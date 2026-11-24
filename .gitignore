@@ -20,3 +20,18 @@ target/
 # misc
 .DS_Store
 Thumbs.db
+
+# Android/Gradle
+.gradle/
+.kotlin/
+build/
+.idea/
+local.properties
+
+# cargo vendor copies (recreatable)
+daemon-rs/vendor/
+
+# runtime binaries without extension
+app-tv/app/src/main/assets/haltee_rtp_sender
+app-tv/app/src/main/assets/audio.primary.amlogic.so
+.orig

@@ -1,0 +1,23 @@
+[package]
+name = "ravenna-discovery"
+version = "0.1.0"
+edition = "2021"
+description = "RAVENNA discovery prototype: DNS-SD/mDNS advertisement (RAVENNA subtypes) + minimal RTSP 1.0 SDP server"
+license = "MIT"
+
+[lib]
+name = "ravenna_discovery"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ravenna-discovery"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+mdns-sd = "0.22"
+socket2 = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

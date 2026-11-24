@@ -1,0 +1,9 @@
+# Cross-compile to Android armv7 with NDK 27 clang.
+# rustup target add armv7-linux-androideabi
+[target.armv7-linux-androideabi]
+linker = "C:\\Users\\ModerRAS\\AppData\\Local\\Android\\Sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe"
+rustflags = [
+  "-C", "link-arg=--target=armv7a-linux-androideabi23",
+  "-C", "link-arg=--sysroot=C:\\Users\\ModerRAS\\AppData\\Local\\Android\\Sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\sysroot",
+  "-C", "link-arg=-fuse-ld=lld",
+]

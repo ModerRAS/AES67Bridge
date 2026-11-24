@@ -1,9 +1,15 @@
 # AES67Bridge
 
-Zidoo Z9X 8K → AES67 音频桥（研究项目）。
+Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
 
-- `app/`：Android 控制台（dev.aes67bridge.console）
-- `device/haltee-proxy/`：vendor audio HAL 代理 .so（内存 overlay，不修改分区）
-- `device/daemon/`：root 侧 FIFO → SRC → L24 RTP 守护
+- `app-tv/`：Android TV 控制台（Kotlin + Compose for TV，`dev.aes67bridge.tv`）：GUI 启动/停止、AES67 参数、布局/延迟/时钟设置、状态与电平。
+- `daemon-rs/`：root 侧 Rust 守护（HAL tee bits → TrueHD/EAC3 解码 → ROAR 渲染 → AES67 组播，L24/PT97，支持 8+4 双流）。
+- `dolby-pipeline/`：TrueHD/EAC3 解析解码 + 对象渲染管线（vendored truehd/eac3/oamd/roar）。
+- `device/haltee-proxy/`：vendor audio HAL 代理 `.so`（tmpfs overlay，不修改物理分区）。
+- `device/daemon/`：早期 C 版 FIFO → SRC → L24 RTP 守护（legacy 引擎）。
+- `app/`：早期 Java 控制台（`dev.aes67bridge.console`）。
+- `ravenna-discovery/`：RAVENNA/mDNS 探索（暂停）。
 
-构建见各目录 `build.ps1`（依赖 Android SDK build-tools / NDK，路径按本机调整）。
+构建见各目录 `build.ps1` / `cargo build`（依赖 Android SDK build-tools、NDK、rustup armv7 target；路径按本机调整）。
+
+运行时所有文件在设备单一目录 `/data/aes67bridge/`（daemon.conf、live.bits/live.pcm FIFO、aes67.sdp、status.json 等）。

@@ -1,0 +1,30 @@
+{
+  "_comment": "Provenance of vendored third-party sources. Licenses are recorded, not judged (product/legal decision is out of scope).",
+  "truehd": {
+    "source": "NativeSpatialPipe modules/media-foundation/decoder/vendor/truehd (harletty/truehdd @ 5c8b880)",
+    "version": "0.7.2",
+    "license": "Apache-2.0",
+    "changes": "none (copied verbatim)"
+  },
+  "eac3": {
+    "source": "NativeSpatialPipe modules/media-foundation/decoder/vendor/eac3 (harletty/harletty-bridge @ 9556bce)",
+    "version": "0.9.0",
+    "license": "Apache-2.0",
+    "changes": "none (copied verbatim)"
+  },
+  "oamd": {
+    "source": "crates.io oamd 0.1.2 (github.com/truehdd/oamd), patched into truehd as a path dependency",
+    "version": "0.1.2",
+    "license": "Apache-2.0",
+    "changes": "none"
+  },
+  "roar": {
+    "source": "aom-roar 1.1.0 @ b3051102efaab6a7c44399c9bc9f986a0f822a22 (AOMediaCodec/roar)",
+    "version": "1.1.0",
+    "patches": [
+      "NativeSpatialPipe modules/croksor/patches/roar-1.1-validated.patch (+449/-48), applied with --ignore-space-change"
+    ],
+    "license": "BSD-3-Clause-Clear (LICENSE) + Alliance for Open Media Patent License 1.0 (PATENTS)",
+    "note": "validated patch only; the extra +26 lines of the scratch worktree (Layout412/NspBed 4.1.2 experiment) are NOT included"
+  }
+}

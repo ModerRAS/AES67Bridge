@@ -1,0 +1,27 @@
+#!/system/bin/sh
+# purge.sh (root) — clear runtime state under /data/aes67bridge.
+# Keeps binaries (aes67_rtp_sender + HAL proxy) and daemon.conf; rollback.sh handles those.
+# Clears: FIFOs, meta, enable/mode/latency/fifo, state/status, SDPs, logs, legacy daemon copies.
+set -u
+ROOT=/data/aes67bridge
+umask 027
+
+# 1) stop the C daemon so the FIFOs can be removed
+for p in $(pidof aes67_rtp_sender); do kill -9 "$p" 2>/dev/null; done
+sleep 1
+rm -f "$ROOT/live.enable"
+
+# 2) runtime data files
+rm -f "$ROOT/live.pcm" "$ROOT/live.bits" "$ROOT/live.meta" "$ROOT/live.bits.meta"
+rm -f "$ROOT/status.json" "$ROOT/state.txt" "$ROOT/mode.txt"
+rm -f "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes"
+rm -f "$ROOT"/*.sdp
+rm -rf "$ROOT/logs"/*
+
+# 3) legacy daemon copies from the pre-consolidation layout
+rm -f /data/local/tmp/aes67_rtp_sender
+rm -f /data/local/tmp/haltee/restart-daemon.sh
+rmdir /data/local/tmp/haltee 2>/dev/null
+
+echo "purged; remaining entries (binaries/config kept):"
+ls -l "$ROOT" 2>&1

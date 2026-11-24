@@ -1,0 +1,37 @@
+[package]
+name = "dolby-pipeline"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+publish = false
+description = "Dolby TrueHD/Atmos object pipeline: live.bits -> TrueHD ES -> OAMD -> N03 -> ROAR -> 480-frame blocks (AES67Bridge)"
+
+[lib]
+name = "dolby_pipeline"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dump-es"
+path = "src/bin/dump_es.rs"
+
+[[bin]]
+name = "decode-probe"
+path = "src/bin/decode_probe.rs"
+
+[[bin]]
+name = "render-probe"
+path = "src/bin/render_probe.rs"
+
+[dependencies]
+truehd = { path = "vendor/truehd" }
+eac3 = { path = "vendor/eac3" }
+oamd = { path = "vendor/oamd" }
+aom-roar = { path = "vendor/roar", features = ["nsp-olr-batch-experiment"] }
+log = "0.4"
+thiserror = "2"
+
+[patch.crates-io]
+oamd = { path = "vendor/oamd" }
+
+[profile.release]
+lto = "thin"

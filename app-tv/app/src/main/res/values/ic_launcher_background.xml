@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Deep navy behind every launcher icon variant (teal glyph on top). -->
+    <color name="ic_launcher_background">#FF0B1219</color>
+</resources>

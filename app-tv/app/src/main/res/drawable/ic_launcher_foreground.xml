@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AES67Bridge launcher foreground.
+     audio waveform (left) -> bridge arch (centre) -> AES67 multicast nodes
+     (right).  108dp adaptive-icon canvas, whole artwork inside the central
+     66dp safe circle.  Main stroke 9.0dp = 8.3% of the canvas
+     (= 12.5% of the 72dp visible area). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="5.9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 26.12,42.79 L 26.12,59.13" />
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="5.9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 33.83,37.35 L 33.83,64.57" />
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="5.9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 41.54,40.07 L 41.54,61.85" />
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="8.98"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 47.44,69.11 L 47.44,50.96" />
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="8.98"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 47.44,50.96 A 9.07,9.07 0 0,1 65.59,50.96" />
+    <path
+        android:strokeColor="#35D0A5"
+        android:strokeWidth="8.98"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 65.59,50.96 L 65.59,69.11" />
+    <path
+        android:fillColor="#35D0A5"
+        android:pathData="M 73.58,40.07 a 3.36,3.36 0 1,0 6.72,0 a 3.36,3.36 0 1,0 -6.72,0 Z" />
+    <path
+        android:fillColor="#35D0A5"
+        android:pathData="M 78.12,50.96 a 3.36,3.36 0 1,0 6.72,0 a 3.36,3.36 0 1,0 -6.72,0 Z" />
+    <path
+        android:fillColor="#35D0A5"
+        android:pathData="M 73.58,61.85 a 3.36,3.36 0 1,0 6.72,0 a 3.36,3.36 0 1,0 -6.72,0 Z" />
+</vector>

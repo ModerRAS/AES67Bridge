@@ -6,7 +6,7 @@
  *   - audio_hw_device_t.open_output_stream   (Android 11 ABI offset 60 on 32-bit)
  *   - audio_stream_out_t.write               (Android 11 ABI offset 64 on 32-bit)
  * logs format/sample-rate/channel/bytes + first bytes + PCM level + bitstream sync
- * words, and dumps raw payload to /data/haltee/dump/.  Everything is transparent:
+ * words, and dumps raw payload to /data/aes67bridge/dump/.  Everything is transparent:
  * the original function is always called, and its return value is passed through.
  *
  * Nothing is persisted; unmounting the overlay + restarting the HAL restores stock.
@@ -37,7 +37,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 
-#define HALTEE_ROOT  "/data/haltee"
+#define HALTEE_ROOT  "/data/aes67bridge"
 #define HALTEE_LOGDIR HALTEE_ROOT "/logs"
 #define HALTEE_LOG   HALTEE_ROOT "/logs/haltee.log"
 #define HALTEE_DUMP  HALTEE_ROOT "/dump"
@@ -51,7 +51,7 @@
 #define STREAM_OUT_OFF_WRITE       64u
 
 #define MAX_STREAMS   24
-#define DUMP_ENABLE_FILE "/data/haltee/dump.enable"
+#define DUMP_ENABLE_FILE "/data/aes67bridge/dump.enable"
 #define DUMP_CAP          (2u * 1024u * 1024u)   /* 2 MB per stream, only when dump.enable exists */
 #define LOGBUF        1400
 
@@ -279,16 +279,16 @@ static void haltee_logv(const char* fmt, va_list ap)
     if (n > (int)sizeof line - 1) n = (int)sizeof line - 1;
     pthread_mutex_lock(&g_loglk);
     if (g_logfd < 0) {
-        mkdir(HALTEE_ROOT, 0777);
-        mkdir(HALTEE_LOGDIR, 0777);
-        g_logfd = open(HALTEE_LOG, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        mkdir(HALTEE_ROOT, 0775);
+        mkdir(HALTEE_LOGDIR, 0700);
+        g_logfd = open(HALTEE_LOG, O_WRONLY | O_CREAT | O_APPEND, 0640);
         g_log_bytes = 0;
     }
     if (g_logfd >= 0 && g_log_bytes + (unsigned long long)n > (unsigned long long)LOG_FILE_CAP) {
         close(g_logfd);
         g_logfd = -1;
         rename(HALTEE_LOG, HALTEE_LOG ".1");
-        g_logfd = open(HALTEE_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        g_logfd = open(HALTEE_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0640);
         g_log_bytes = 0;
     }
     if (g_logfd >= 0) {
@@ -515,21 +515,21 @@ static void haltee_account(haltee_stream* e, const void* buffer, size_t bytes, s
 }
 
 /* ---------------- R3 instrumentation: write granularity + buffer-size override ----------------
- * /data/haltee/timing.enable: collect bounded stats over the next 400 writes of the
+ * /data/aes67bridge/timing.enable: collect bounded stats over the next 400 writes of the
  *   player's DIRECT/48k/2ch stream (interval dt histogram + write size distribution),
  *   then emit ONE summary line.  No per-write logging.
- * /data/haltee/latency.frames: if present (e.g. "240" = 5 ms @48k), patch the opened
+ * /data/aes67bridge/latency.frames: if present (e.g. "240" = 5 ms @48k), patch the opened
  *   DIRECT stream's get_buffer_size() to return that many frames, so AudioFlinger
  *   writes smaller chunks (opt-in experiment; remove file + reopen stream to revert).
- * /data/haltee/fifo.pipe_bytes: optional FIFO pipe size override (default 32768).
+ * /data/aes67bridge/fifo.pipe_bytes: optional FIFO pipe size override (default 32768).
  */
 static unsigned long long haltee_mono_ms(void);
 static int haltee_popcount32(uint32_t v);
 static int haltee_file_exists(const char* path);
 
-#define TIMING_ENABLE_FILE  "/data/haltee/timing.enable"
-#define LATENCY_FRAMES_FILE "/data/haltee/latency.frames"
-#define FIFO_PIPE_BYTES     "/data/haltee/fifo.pipe_bytes"
+#define TIMING_ENABLE_FILE  "/data/aes67bridge/timing.enable"
+#define LATENCY_FRAMES_FILE "/data/aes67bridge/latency.frames"
+#define FIFO_PIPE_BYTES     "/data/aes67bridge/fifo.pipe_bytes"
 #define TIMING_WINDOW       400
 
 static volatile int g_timing_active = 0;
@@ -647,18 +647,18 @@ static void haltee_gbs_patch(haltee_stream* e, void* stream)
                e->idx, frames, fb, (unsigned)(frames * (int)fb), (void*)(uintptr_t)cur, rc);
 }
 
-/* ---------------- v5: compressed bitstream export -> /data/haltee/live.bits ----------------
+/* ---------------- v5: compressed bitstream export -> /data/aes67bridge/live.bits ----------------
  * AC3/EAC3/DTS/DTS-HD/TRUEHD/IEC61937 (vendor fmt 0x09..0x0f) are exported as RAW BYTES
- * into FIFO /data/haltee/live.bits, in parallel with the PCM FIFO.  Non-blocking, drop on
- * full, never on disk (except optional debug dump gated by /data/haltee/bits.dump.enable).
+ * into FIFO /data/aes67bridge/live.bits, in parallel with the PCM FIFO.  Non-blocking, drop on
+ * full, never on disk (except optional debug dump gated by /data/aes67bridge/bits.dump.enable).
  */
 static unsigned long long haltee_mono_ms(void);
 static int haltee_file_exists(const char* path);
 static volatile int g_live_active;
 
-#define LIVE_BITS_FIFO   "/data/haltee/live.bits"
-#define LIVE_BITS_META   "/data/haltee/live.bits.meta"
-#define BITS_DUMP_ENABLE "/data/haltee/bits.dump.enable"
+#define LIVE_BITS_FIFO   "/data/aes67bridge/live.bits"
+#define LIVE_BITS_META   "/data/aes67bridge/live.bits.meta"
+#define BITS_DUMP_ENABLE "/data/aes67bridge/bits.dump.enable"
 #define BITS_DUMP_DIR    HALTEE_ROOT "/dump"
 #define BITS_DUMP_CAP    (2u * 1024u * 1024u)
 
@@ -720,10 +720,11 @@ static void haltee_bits_write_meta(void)
     if (n <= 0) return;
     char tmp[128];
     snprintf(tmp, sizeof tmp, LIVE_BITS_META ".tmp");
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return;
     ssize_t w = write(fd, buf, (size_t)n);
     (void)w;
+    fchmod(fd, 0600);
     close(fd);
     rename(tmp, LIVE_BITS_META);
 }
@@ -799,18 +800,18 @@ static void haltee_bits_feed(haltee_stream* e, const void* buffer, size_t bytes)
  * creation for this uid (socket() -> EPERM), so RTP is NOT sent from here.
  * This proxy instead exports the official player's 48 kHz / 2 ch PCM,
  * unchanged (AUDIO_FORMAT_PCM_16_BIT or PCM_24_BIT_PACKED, bytes as-is) into
- * the FIFO /data/haltee/live.pcm.  A root-side AES67 daemon reads the FIFO,
+ * the FIFO /data/aes67bridge/live.pcm.  A root-side AES67 daemon reads the FIFO,
  * converts to L24 and sends RTP (PT 97, 1 ms packets) to 239.69.2.1:5004.
  *
- * Enabled by /data/haltee/live.enable.  The audio writer thread opens nothing
+ * Enabled by /data/aes67bridge/live.enable.  The audio writer thread opens nothing
  * and never blocks: writes to the FIFO are O_NONBLOCK and samples are dropped
  * if the reader is slow or absent.  stream->write() blocking behaviour and its
  * return value are never changed.
  */
-#define LIVE_ENABLE_FILE "/data/haltee/live.enable"
-#define LIVE_FIFO        "/data/haltee/live.pcm"
-#define LIVE_META        "/data/haltee/live.meta"
-#define LIVE_SDP         "/data/haltee/haltee.sdp"
+#define LIVE_ENABLE_FILE "/data/aes67bridge/live.enable"
+#define LIVE_FIFO        "/data/aes67bridge/live.pcm"
+#define LIVE_META        "/data/aes67bridge/live.meta"
+#define LIVE_SDP         "/data/aes67bridge/haltee.sdp"
 #define LIVE_GROUP       "239.69.2.1"
 #define LIVE_PORT        5004
 #define LIVE_PT          97
@@ -873,15 +874,16 @@ static void haltee_live_write_sdp(void)
         (unsigned)((unsigned long)time(0) & 0x7ffffffful),
         LIVE_PORT, LIVE_PT, LIVE_PT);
     if (n <= 0) return;
-    int fd = open(LIVE_SDP, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(LIVE_SDP, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { haltee_log("LIVE sdp open failed errno=%d", errno); return; }
     ssize_t wr = write(fd, sdp, (size_t)n);
     (void)wr;
+    fchmod(fd, 0644);
     close(fd);
     haltee_log("LIVE sdp written: %s (%d bytes) PT=%d L24/48000/2", LIVE_SDP, n, LIVE_PT);
 }
 
-/* /data/haltee/live.meta - what the FIFO currently carries (read by root daemon) */
+/* /data/aes67bridge/live.meta - what the FIFO currently carries (read by root daemon) */
 static void haltee_live_write_meta_ex(unsigned int sid, unsigned int fmt,
                                       unsigned int rate, unsigned int ch)
 {
@@ -903,10 +905,11 @@ static void haltee_live_write_meta_ex(unsigned int sid, unsigned int fmt,
     if (n <= 0) return;
     char tmp[128];
     snprintf(tmp, sizeof tmp, LIVE_META ".tmp");
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return;
     ssize_t w = write(fd, buf, (size_t)n);
     (void)w;
+    fchmod(fd, 0600);
     close(fd);
     rename(tmp, LIVE_META);
 }
@@ -988,10 +991,10 @@ static void* haltee_live_thread(void* arg)
         int want = haltee_file_exists(LIVE_ENABLE_FILE);
         if (want && !g_live_active) {
             if (!haltee_path_exists(LIVE_FIFO)) {
-                if (mkfifo(LIVE_FIFO, 0666) != 0 && errno != EEXIST)
+                if (mkfifo(LIVE_FIFO, 0620) != 0 && errno != EEXIST)
                     haltee_log("LIVE mkfifo failed errno=%d (%s)", errno, strerror(errno));
             }
-            chmod(LIVE_FIFO, 0666);
+            chmod(LIVE_FIFO, 0620);
             int fd = open(LIVE_FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC);
             if (fd >= 0) {
 #ifdef F_SETPIPE_SZ
@@ -1023,10 +1026,10 @@ static void* haltee_live_thread(void* arg)
             haltee_live_write_sdp();
             /* v5: open the compressed-bitstream FIFO (independent non-blocking writer) */
             if (!haltee_path_exists(LIVE_BITS_FIFO)) {
-                if (mkfifo(LIVE_BITS_FIFO, 0666) != 0 && errno != EEXIST)
+                if (mkfifo(LIVE_BITS_FIFO, 0620) != 0 && errno != EEXIST)
                     haltee_log("BITS mkfifo failed errno=%d", errno);
             }
-            chmod(LIVE_BITS_FIFO, 0666);
+            chmod(LIVE_BITS_FIFO, 0620);
             {
                 int bfd = open(LIVE_BITS_FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC);
                 if (bfd >= 0) {
@@ -1185,10 +1188,10 @@ static void haltee_wrap_stream(void* stream, struct haltee_config* cfg, uint32_t
         return;
     }
 
-    /* raw dump is OFF by default (eMMC wear): only when /data/haltee/dump.enable exists */
+    /* raw dump is OFF by default (eMMC wear): only when /data/aes67bridge/dump.enable exists */
     if (haltee_file_exists(DUMP_ENABLE_FILE)) {
-        mkdir(HALTEE_ROOT, 0777);
-        mkdir(HALTEE_DUMP, 0777);
+        mkdir(HALTEE_ROOT, 0775);
+        mkdir(HALTEE_DUMP, 0700);
         e->cap = (uint64_t)DUMP_CAP;
         snprintf(e->dump_path, sizeof e->dump_path, HALTEE_DUMP "/s%02d_fmt%08x.bin", e->idx, e->format);
         e->dump_fd = open(e->dump_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -1316,12 +1319,12 @@ static int haltee_dev_open(const hw_module_t* module, const char* id, hw_device_
     if (!g_init_done) {
         g_init_done = 1;
         g_maps_n = -1;
-        mkdir(HALTEE_ROOT, 0777);
-        mkdir(HALTEE_LOGDIR, 0777);
-        mkdir(HALTEE_DUMP, 0777);
+        mkdir(HALTEE_ROOT, 0775);
+        mkdir(HALTEE_LOGDIR, 0700);
+        mkdir(HALTEE_DUMP, 0700);
         void* lh = dlopen("liblog.so", RTLD_NOW | RTLD_LOCAL);
         if (lh) g_log_print = (int (*)(int, const char*, const char*, ...))dlsym(lh, "__android_log_print");
-        haltee_log("=== haltee proxy v5-live loaded: pid=%d uid=%d euid=%d ===",
+        haltee_log("=== haltee proxy v5-live-r2 (dir=/data/aes67bridge) loaded: pid=%d uid=%d euid=%d ===",
                    (int)getpid(), (int)getuid(), (int)geteuid());
     }
     haltee_log("PROXY dev_open id=%s", id ? id : "(null)");

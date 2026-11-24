@@ -1,0 +1,54 @@
+[package]
+name = "aes67-bridge-daemon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "AES67Bridge device-side sender daemon (Rust port of aes67_rtp_sender C daemon)"
+
+[lib]
+name = "aes67d"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aes67-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "aes67-feed"
+path = "src/bin/feed.rs"
+
+[[bin]]
+name = "aes67-recv"
+path = "src/bin/recv.rs"
+
+[[bin]]
+name = "aes67-dump-src"
+path = "src/bin/dump_src.rs"
+
+[[bin]]
+name = "aes67-compliance"
+path = "src/bin/compliance.rs"
+
+[dependencies]
+libc = "0.2"
+rubato = "5.1.0"
+# Vendored NSP AES67 module (AES67 transport: ptime, multi-flow, L16/L24,
+# SDP/SAP, DSCP, PTP follower). Copied from aes67-std-ds
+# (branch feat/aes67-std-ports-rates-ptime, HEAD 0091041) plus a small
+# local-clock patch documented in vendor/nsp_aes67/PATCHES.md.
+nsp_aes67 = { path = "vendor/nsp_aes67" }
+dolby-pipeline = { path = "../dolby-pipeline" }
+# Vendored E-AC-3 / AC-3 core PCM decoder (Apache-2.0, harletty-bridge eac3
+# 0.9.0) used by the live.bits path: HAL tee raw compressed ES -> PCM -> AES67.
+eac3 = { path = "../dolby-pipeline/vendor/eac3" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = false
+[patch.crates-io]
+# dolby-pipeline vendors a patched oamd; patch sections only apply at the
+# workspace root, so the daemon has to repeat it when linking the pipeline.
+oamd = { path = "../dolby-pipeline/vendor/oamd" }
