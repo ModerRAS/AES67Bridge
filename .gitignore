@@ -1,0 +1,22 @@
+# build outputs
+out/
+classes/
+target/
+*.apk
+*.dex
+*.class
+# binaries
+*.so
+*.bin
+*.img
+# secrets/keys
+*.keystore
+*.jks
+# media/test artifacts
+*.wav
+*.mp4
+*.png
+*.jpg
+# misc
+.DS_Store
+Thumbs.db

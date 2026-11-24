@@ -1,0 +1,1 @@
+# AES67Bridge`n`nZidoo Z9X 8K → AES67 音频桥（研究项目）。`n`n- `app/`：Android 控制台（dev.aes67bridge.console）`n- `device/haltee-proxy/`：vendor audio HAL 代理 .so（内存 overlay，不修改分区）`n- `device/daemon/`：root 侧 FIFO → SRC → L24 RTP 守护`n`n构建见各目录 build.ps1（依赖 Android SDK build-tools / NDK，路径按本机调整）。`n
