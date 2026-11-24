@@ -272,21 +272,10 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     }
 
     // 0 主设置；1 组播编辑；2 PTP GM 编辑；3..6 数字键盘（组播地址/端口/GM 地址/domain）
-    // 读一次当前 HAL 实际流，用来说明"布局 ≠ 源声道"这类矛盾。
-    // 运行时目录已统一到 /data/aes67bridge；旧 /data/haltee 仅作迁移期只读回退。
-    val srcStatus = remember {
-        try {
-            val f = listOf(File("/data/aes67bridge/status.json"), File("/data/haltee/status.json"))
-                .firstOrNull { it.exists() }
-            f?.readText()
-        } catch (t: Throwable) { null }
-    }
-    val srcCh = remember {
-        srcStatus?.let { Regex("\"ch\"\\s*:\\s*(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
-    }
-    val srcRate = remember {
-        srcStatus?.let { Regex("\"rate\"\\s*:\\s*(\\d+)").find(it)?.groupValues?.get(1) }
-    }
+    // 读一次当前 HAL 实际流（abstract status socket，旧引擎回退 JSON 文件），用来说明"布局 ≠ 源声道"这类矛盾。
+    val srcSt = remember { readStatus() }
+    val srcCh = remember { srcSt.ch.toIntOrNull() }
+    val srcRate = remember { srcSt.rate.takeIf { it.isNotEmpty() } }
 
     var page by remember { mutableStateOf(0) }
     var gAddr by remember { mutableStateOf("") }
@@ -499,7 +488,7 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     OptChip("回滚原厂 HAL") { onApply(mapOf("rollback" to "1")) }
                                 }
                                 Text(
-                                    "AES67Bridge 0.1.0 · status.json 实时", color = PDim, fontSize = 12.sp,
+                                    "AES67Bridge 0.1.0 · status socket 实时", color = PDim, fontSize = 12.sp,
                                     modifier = Modifier.padding(top = 8.dp)
                                 )
                             }

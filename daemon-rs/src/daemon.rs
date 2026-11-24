@@ -203,6 +203,14 @@ impl Daemon {
                 ),
             )
         })?;
+        match status::init_socket(status::SOCKET_NAME) {
+            Ok(()) => {
+                logln!("status socket @{}", status::SOCKET_NAME);
+                // Rust engine is socket-only: drop the legacy JSON file so the UI cannot read stale data.
+                let _ = std::fs::remove_file(&cfg.status);
+            }
+            Err(err) => logln!("WARN status socket bind failed: {err}"),
+        }
         if cfg.sched_fifo > 0 {
             let rc = platform::sched_fifo(cfg.sched_fifo);
             logln!("SCHED_FIFO prio={} rc={}", cfg.sched_fifo, rc);
@@ -1995,7 +2003,7 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         sap_interval_s: cfg.sap_interval_s,
         bits: if include_bits { Some(&bits_view) } else { None },
     };
-    let _ = status::write(&cfg.status, &snapshot);
+    status::publish(&snapshot);
 }
 
 fn write_status(
@@ -2091,5 +2099,5 @@ fn write_status(
         sap_interval_s: cfg.sap_interval_s,
         bits,
     };
-    let _ = status::write(&cfg.status, &snapshot);
+    status::publish(&snapshot);
     let _ = parts.submitted;}

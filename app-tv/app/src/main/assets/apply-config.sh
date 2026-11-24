@@ -17,7 +17,7 @@ chmod 0644 "$CONF" 2>/dev/null
 group=239.69.67.1; port=5004; ptime_us=1000; maxch=8; layout=7.1; codec=pcm
 split=1; sap=1; gain_db=0; hal_buf=20; fifo_kb=32; ptp=0; asrc=0
 pcm_export=1; bits_export=1
-[ -f "$CONF" ] && . "$CONF"
+if [ -f "$CONF" ]; then sed 's/\r$//' "$CONF" > "$ROOT/.conf.lf"; . "$ROOT/.conf.lf"; fi
 
 if [ "$hal_buf" = "5" ]; then
   echo 240 > "$ROOT/latency.frames"

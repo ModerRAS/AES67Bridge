@@ -170,7 +170,7 @@ fun ConsoleScreen() {
         }
         if (stateText == "running" && !st.hasData) {
             Text(
-                "⚠ 状态文件是 running，但 status.json 缺失或已过期（" +
+                "⚠ 状态文件是 running，但 status socket 无响应且无 JSON 回退（" +
                     (if (st.ageMs >= 0) "上次更新 " + (st.ageMs / 1000) + "s 前" else "文件不存在") +
                     "）：守护可能没起来，按「启动」或看 /data/aes67bridge/logs/daemon.log",
                 color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
@@ -179,7 +179,7 @@ fun ConsoleScreen() {
         Spacer(Modifier.height(10.dp))
         Text(
             "state.txt=" + (if (stateText.isEmpty()) "-" else stateText) +
-                " · status.json " + (if (st.ageMs >= 0) (st.ageMs / 1000.0).toString().take(5) + "s 前" else "-") +
+                " · status socket " + (if (st.ageMs >= 0) (st.ageMs / 1000.0).toString().take(5) + "s 前" else "-") +
                 " · 输出 " + nz(st.dest),
             color = Dim, fontSize = 12.sp
         )
@@ -477,7 +477,7 @@ private fun SettingsDialog(
                                 SetRow("危险") {
                                     Chip("回滚原厂 HAL") { onApply(mapOf("rollback" to "1")) }
                                 }
-                                Text("AES67Bridge 0.1.0 · status.json 实时", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                                Text("AES67Bridge 0.1.0 · status socket 实时", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
                             }
                         }
                     }
@@ -529,4 +529,3 @@ private fun channelLabels(layout: String, ch: String): List<String> = when (layo
         else -> listOf("L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb")
     }
 }
-

@@ -21,6 +21,8 @@ data class Status(
 )
 
 /** 运行时目录已统一到 /data/aes67bridge；旧 /data/haltee 仅作迁移期只读回退。 */
+/** Rust daemon 的状态通道：abstract UNIX socket（不再轮询 JSON 文件）。 */
+private const val STATUS_SOCKET = "aes67bridge.status"
 private const val STATUS_PATH = "/data/aes67bridge/status.json"
 private const val STATUS_PATH_LEGACY = "/data/haltee/status.json"
 private const val STATE_PATH = "/data/aes67bridge/state.txt"
@@ -41,10 +43,27 @@ private fun grab(re: Regex, s: String?): String {
     return try { re.find(s)?.groupValues?.get(1) ?: "" } catch (t: Throwable) { "" }
 }
 
+/** 读 abstract UNIX socket；连接成功即视为新鲜（daemon 每次 publish 写一帧后关闭）。 */
+private fun readStatusSocket(): String? {
+    var socket: android.net.LocalSocket? = null
+    return try {
+        socket = android.net.LocalSocket()
+        socket.connect(
+            android.net.LocalSocketAddress(STATUS_SOCKET, android.net.LocalSocketAddress.Namespace.ABSTRACT)
+        )
+        socket.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+    } catch (t: Throwable) {
+        null
+    } finally {
+        try { socket?.close() } catch (t: Throwable) { }
+    }
+}
+
 fun readStatus(): Status {
-    val f = firstExisting(STATUS_PATH, STATUS_PATH_LEGACY) ?: return Status()
-    val js = readFile(f.path) ?: return Status()
-    val age = System.currentTimeMillis() - f.lastModified()
+    val socketBody = readStatusSocket()
+    val f = firstExisting(STATUS_PATH, STATUS_PATH_LEGACY)
+    val js = socketBody ?: (f?.let { readFile(it.path) } ?: return Status())
+    val age = if (socketBody != null) 0L else System.currentTimeMillis() - (f?.lastModified() ?: 0L)
     val levels = try {
         val m = Regex("\"levels\"\\s*:\\s*\\[([^\\]]*)\\]").find(js)
         m?.groupValues?.get(1)?.split(",")?.mapNotNull { it.trim().toFloatOrNull() } ?: emptyList()

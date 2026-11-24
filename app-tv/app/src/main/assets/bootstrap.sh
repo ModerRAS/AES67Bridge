@@ -75,7 +75,7 @@ fi
 
 # 6) AES67 mode from daemon.conf (single source of truth; default = standard 20ms)
 hal_buf=20; pcm_export=1; bits_export=1
-[ -f "$ROOT/daemon.conf" ] && . "$ROOT/daemon.conf"
+if [ -f "$ROOT/daemon.conf" ]; then sed 's/\r$//' "$ROOT/daemon.conf" > "$ROOT/.conf.lf"; . "$ROOT/.conf.lf"; fi
 if [ "$hal_buf" = "5" ]; then
   echo 240 > "$ROOT/latency.frames"
   echo 8192 > "$ROOT/fifo.pipe_bytes"
@@ -96,7 +96,10 @@ chmod 0644 "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes" 2>/dev/null
 # 7) wait for the HAL proxy to create the FIFOs (gated by live.enable), then (re)start the daemon
 i=0
 while [ ! -p "$ROOT/live.pcm" ] && [ "$i" -lt 20 ]; do sleep 0.25; i=$((i+1)); done
-if [ -x /data/local/tmp/haltee/restart-daemon.sh ]; then
+if [ "${engine:-legacy}" = "rust" ] && [ -f "$STAGE/restart.sh" ] && [ -x "$ROOT/aes67-daemon" ]; then
+  echo "bootstrap: rust engine -> restart.sh"
+  sh "$STAGE/restart.sh" >> "$LOG" 2>&1
+elif [ -x /data/local/tmp/haltee/restart-daemon.sh ]; then
   sh /data/local/tmp/haltee/restart-daemon.sh >> "$LOG" 2>&1
 else
   echo "ERROR restart-daemon.sh missing" >> "$LOG"

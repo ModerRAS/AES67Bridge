@@ -9,7 +9,7 @@ umask 027
 mkdir -p "$ROOT/logs"; chown root:root "$ROOT/logs"; chmod 0700 "$ROOT/logs"
 group=239.69.67.1; port=5004; ptime_us=1000; layout=7.1; decode=auto; engine=legacy
 ptp=0; ptp_gm=; ptp_domain=0
-[ -f "$CONF" ] && . "$CONF"
+if [ -f "$CONF" ]; then sed 's/\r$//' "$CONF" > "$ROOT/.conf.lf"; chmod 0600 "$ROOT/.conf.lf"; . "$ROOT/.conf.lf"; fi
 
 # stop either engine
 for p in /proc/[0-9]*; do
