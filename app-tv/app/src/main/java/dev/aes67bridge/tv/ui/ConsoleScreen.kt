@@ -96,7 +96,7 @@ fun ConsoleScreen() {
         val outCh = layoutChannels(layout)
         val srcCh = st.ch.toIntOrNull()
         Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            InfoCard("信号源（HAL 抓到的原始流）", fmtValue(st), "源 " + fmtRate(st.rate) + "Hz · SRC " + nz(st.rsIn) + " → " + nz(st.rsOut), Modifier.weight(1f))
+            InfoCard("信号源（HAL 抓到的原始流）", fmtValue(st), srcSubLine(st), Modifier.weight(1f))
             InfoCard("AES67 输出", "48k / " + outCh + "ch", "layout " + layout + " · " + (conf["group"] ?: "-") + ":" + (conf["port"] ?: "-"), Modifier.weight(1f))
             InfoCard(
                 "延迟模式",
@@ -200,8 +200,36 @@ private fun fmtRate(r: String): String = when (r) {
 
 private fun fmtValue(st: Status): String {
     if (!st.hasData) return "待机"
-    val codec = if (st.codec.isEmpty()) "-" else st.codec.uppercase()
-    return codec + " " + fmtRate(st.rate) + " / " + nz(st.ch) + "ch"
+    // 未开流（daemon 空闲）时不再显示解码模式冒充片源；只有 live.bits.meta 匹配当前 stream_id 才算真实码流。
+    if (st.streamId <= 0) return "等待片源"
+    if (!st.hasSource) return "码流开启中…"
+    val name = srcCodecName(st)
+    val rate = fmtRate(st.srcRate)
+    return if (rate.isEmpty() || rate == "-") name else name + " " + rate
+}
+
+private fun srcCodecName(st: Status): String {
+    val guess = st.srcGuess.lowercase()
+    if (guess.contains("truehd")) return "TRUEHD/ATMOS"
+    val fmt = st.srcFmt.lowercase()
+    val byte = if (fmt.startsWith("0x") && fmt.length >= 4) fmt.substring(2, 4).toIntOrNull(16) ?: -1 else -1
+    return when (byte) {
+        0x09 -> "AC3"
+        0x0a -> "E-AC3"
+        0x0b, 0x0c -> "DTS"
+        0x0e -> "IEC61937"
+        0x0f -> "TRUEHD"
+        else -> if (guess.isEmpty()) "码流" else guess.uppercase()
+    }
+}
+
+private fun srcSubLine(st: Status): String {
+    if (!st.hasData || st.streamId <= 0) {
+        val m = if (st.codec.isEmpty()) "-" else st.codec.uppercase()
+        return "未开流 · 解码模式 " + m + "（配置值，非片源检测）"
+    }
+    if (!st.hasSource) return "已开流，等待 live.bits.meta 匹配 · SRC " + nz(st.rsIn) + " → " + nz(st.rsOut)
+    return "fmt " + st.srcFmt.take(6) + " · " + nz(st.srcFmtName) + " · chmask " + nz(st.srcChmask)
 }
 
 private fun readConf(ctx: android.content.Context): Map<String, String> {

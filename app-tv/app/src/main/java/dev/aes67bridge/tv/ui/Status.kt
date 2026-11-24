@@ -16,6 +16,14 @@ data class Status(
     val ptime: String = "",
     val split: String = "",
     val layout: String = "",
+    val streamId: Long = 0,
+    /** true = status.stream.id>0 且在 live.bits.meta 里找到同一 stream_id（真实码流已开流）。 */
+    val hasSource: Boolean = false,
+    val srcFmt: String = "",
+    val srcFmtName: String = "",
+    val srcGuess: String = "",
+    val srcChmask: String = "",
+    val srcRate: String = "",
     val ageMs: Long = -1,
     val levels: List<Float> = emptyList()
 )
@@ -43,6 +51,18 @@ private fun grab(re: Regex, s: String?): String {
     return try { re.find(s)?.groupValues?.get(1) ?: "" } catch (t: Throwable) { "" }
 }
 
+
+private const val BITS_META_PATH = "/data/aes67bridge/live.bits.meta"
+
+/** live.bits.meta 的 key=value 快照：这是 HAL tee 真实开流时才写的原始码流信息。 */
+private fun readMetaMap(): Map<String, String> {
+    val body = readFile(BITS_META_PATH) ?: return emptyMap()
+    return body.lineSequence().mapNotNull { ln ->
+        val i = ln.indexOf('=');
+        if (i > 0) ln.substring(0, i).trim() to ln.substring(i + 1).trim() else null
+    }.toMap()
+}
+
 /** 读 abstract UNIX socket；连接成功即视为新鲜（daemon 每次 publish 写一帧后关闭）。 */
 private fun readStatusSocket(): String? {
     var socket: android.net.LocalSocket? = null
@@ -68,6 +88,11 @@ fun readStatus(): Status {
         val m = Regex("\"levels\"\\s*:\\s*\\[([^\\]]*)\\]").find(js)
         m?.groupValues?.get(1)?.split(",")?.mapNotNull { it.trim().toFloatOrNull() } ?: emptyList()
     } catch (t: Throwable) { emptyList() }
+    val streamId = grab(Regex("\"stream\"\\s*:\\s*\\{\"id\"\\s*:\\s*(-?\\d+)"), js).toLongOrNull() ?: 0L
+    val meta = if (streamId > 0) readMetaMap() else emptyMap()
+    val metaId = meta["stream_id"]?.toLongOrNull() ?: -1L
+    // HAL 可能在 daemon 绑流后再次开流（meta stream_id 更大）；meta 不比当前会话旧即视为同一真实码流。
+    val hasSource = streamId > 0 && metaId > 0 && metaId >= streamId
     return Status(
         hasData = age in 0..5000,
         codec = grab(Regex("\"codec\"\\s*:\\s*\"([a-zA-Z0-9_]+)\""), js),
@@ -82,6 +107,13 @@ fun readStatus(): Status {
         ptime = grab(Regex("\"ptime_us\"\\s*:\\s*(\\d+)"), js),
         split = grab(Regex("\"split\"\\s*:\\s*(\\d+)"), js),
         layout = grab(Regex("\"layout\"\\s*:\\s*\"([0-9.]+)\""), js),
+        streamId = streamId,
+        hasSource = hasSource,
+        srcFmt = meta["fmt"] ?: "",
+        srcFmtName = meta["fmt_name"] ?: "",
+        srcGuess = meta["codec_guess"] ?: "",
+        srcChmask = meta["chmask"] ?: "",
+        srcRate = meta["rate"] ?: "",
         ageMs = age,
         levels = levels
     )

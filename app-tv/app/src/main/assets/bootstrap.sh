@@ -96,6 +96,8 @@ chmod 0644 "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes" 2>/dev/null
 # 7) wait for the HAL proxy to create the FIFOs (gated by live.enable), then (re)start the daemon
 i=0
 while [ ! -p "$ROOT/live.pcm" ] && [ "$i" -lt 20 ]; do sleep 0.25; i=$((i+1)); done
+# meta files are written by audioserver; make them readable so the TV app can show the real source codec
+chmod 0644 "$ROOT/live.bits.meta" "$ROOT/live.meta" 2>/dev/null
 if [ "${engine:-legacy}" = "rust" ] && [ -f "$STAGE/restart.sh" ] && [ -x "$ROOT/aes67-daemon" ]; then
   echo "bootstrap: rust engine -> restart.sh"
   sh "$STAGE/restart.sh" >> "$LOG" 2>&1
