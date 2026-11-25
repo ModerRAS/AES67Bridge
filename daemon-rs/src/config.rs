@@ -315,6 +315,10 @@ pub struct Config {
     /// source channel labels intersect, no up/downmix); any other value is
     /// refused instead of silently enabling a missing adapter.
     pub layout_mode: String,
+    /// Render PCM through ROAR (channel-based element with the real source layout,
+    /// IAMF downmix for legal target pairs, EAR otherwise). Default true: the wire
+    /// layout becomes the configured target layout and the bridge owns downmix.
+    pub pcm_render: bool,
     pub codec: String,
     pub encoding: Encoding,
     pub mtu: usize,
@@ -369,6 +373,7 @@ impl Default for Config {
             dump_pcm: String::new(),
             layout: String::new(),
             layout_mode: "strict".to_string(),
+            pcm_render: true,
             codec: "pcm".to_string(),
             encoding: Encoding::L24,
             mtu: crate::DEFAULT_MTU,
@@ -524,7 +529,7 @@ impl Config {
             "{program} usage: --fifo F --meta M [--seconds N] [--sched-fifo PRIO] [--sdp PATH] \
 [--status PATH] [--config PATH] [--lock PATH] [--group G] [--port P] \
 [--ptime-us 125|250|500|1000] [--maxch 2..16] [--layout 7.1] \
-[--layout-mode strict] [--bits /data/haltee/live.bits] \
+[--layout-mode strict] [--pcm-render 1|0] [--bits /data/haltee/live.bits] \
 [--bits-meta /data/haltee/live.bits.meta] \
 [--codec pcm|bits|auto|eac3|truehd|l16] [--encoding l24|l16] [--pt N] [--mtu 1500] [--target-layout L] \
 [--split] [--no-split] [--legacy-split] [--buffer-ms 100] [--prebuffer-ms 20] \
@@ -563,6 +568,7 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
         "bits" => cfg.bits = value.to_string(),
         "bits_meta" => cfg.bits_meta = value.to_string(),
         "layout_mode" => cfg.layout_mode = value.trim().to_string(),
+        "pcm_render" => cfg.pcm_render = parse_bool(value),
         "split" => {
             // UI contract (lead decision 2026-11-24): split=1 is AES67 standard
             // multi-flow packing (flows of up to 8 channels, >8 channel sources
@@ -778,6 +784,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             "--dump-bits" => cfg.dump_bits = next(&mut index, args)?,
             "--dump-pcm" => cfg.dump_pcm = next(&mut index, args)?,
             "--layout-mode" => cfg.layout_mode = next(&mut index, args)?,
+            "--pcm-render" => {
+                cfg.pcm_render = parse_bool(&next(&mut index, args)?);
+            }
             "--split" => {
                 cfg.legacy_split = false;
                 cfg.no_split = false;

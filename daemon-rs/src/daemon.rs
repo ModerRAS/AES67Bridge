@@ -235,6 +235,8 @@ impl Daemon {
         let mut plan: Vec<FlowPlan> = Vec::new();
         let mut submitter = Submitter::new(2);
         let mut resampler: Box<dyn Resampler> = Box::new(Passthrough);
+        // PCM -> ROAR render stage (None = legacy strict intersection path).
+        let mut render_stage: Option<PcmRenderStage> = None;
         let mut current = StreamShape {
             channels: 2,
             source_channels: 2,
@@ -256,6 +258,7 @@ impl Daemon {
         let mut maxch_warned = false;
         let mut fmt_warned = false;
         let mut submit_warned = false;
+        let mut pcm_render_warned = false;
         let start_ns = platform::now_ns();
         let mut last_meta_ns = 0i64;
         let mut last_status_ns = 0i64;
@@ -299,13 +302,28 @@ impl Daemon {
                     }
                     source_channels = cfg.maxch;
                 }
-                // daemon.conf layout is the target/maximum layout declared to
-                // the backend. The actual wire layout is the intersection with
-                // the source block layout (meta layout key or channel-count
-                // inference): missing target channels are not filled and extra
-                // source channels are dropped without downmix.
-                let layout_plan = plan_layout(&cfg.layout, source_channels, meta.layout.as_deref())
-                    .map_err(|message| (EXIT_USAGE, message))?;
+                // daemon.conf layout is the target/maximum layout declared to the backend.
+                // PCM is rendered through ROAR when possible: the real source layout is declared
+                // as a channel-based element and ROAR maps it to the configured target layout
+                // (IAMF downmix for legal pairs, EAR otherwise), so the wire layout is the target.
+                // Without a usable target/source layout the legacy strict intersection is kept
+                // (missing target channels not filled, extra source channels dropped, no downmix).
+                let source_layout_id =
+                    match meta.layout.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(id) if crate::config::layout_channels(id) == Some(source_channels) => {
+                            id.to_string()
+                        }
+                        _ => crate::config::derive_layout(source_channels).to_string(),
+                    };
+                let layout_plan = classify_pcm_layout(
+                    &cfg,
+                    &source_layout_id,
+                    source_channels,
+                    meta.layout.as_deref(),
+                    &mut render_stage,
+                    &mut pcm_render_warned,
+                )
+                .map_err(|message| (EXIT_USAGE, message))?;
                 let channels = layout_plan.channels;
                 if rate != 44_100 && rate != 48_000 {
                     if !fmt_warned {
@@ -379,7 +397,10 @@ impl Daemon {
                     }
                     publish_sdp(&fresh, &cfg, &plan, &self.shared);
                     session = Some(fresh);
-                    submitter = Submitter::new(source_channels);
+                    submitter = Submitter::new(layout_plan.source_channels);
+                    if let Some(stage) = render_stage.as_mut() {
+                        stage.reset();
+                    }
                     carry.clear();
                     meter.reset();
                     current = StreamShape {
@@ -435,6 +456,7 @@ impl Daemon {
                             resampler.as_mut(),
                             &mut meter,
                             &mut submitter,
+                            render_stage.as_mut(),
                         );
                     }
                     if consumed > 0 {
@@ -452,6 +474,7 @@ impl Daemon {
                         resampler.as_mut(),
                         &mut meter,
                         &mut submitter,
+                        render_stage.as_mut(),
                     );
                     std::thread::sleep(Duration::from_millis(20));
                 } else if platform::now_ns() - last_data_ns > 500_000_000 {
@@ -464,6 +487,7 @@ impl Daemon {
                         resampler.as_mut(),
                         &mut meter,
                         &mut submitter,
+                        render_stage.as_mut(),
                     );
                 }
                 if let Err(err) = submitter.flush(active) {
@@ -491,7 +515,7 @@ impl Daemon {
                     last_stat_ns = now;
                     let counters = active.counters();
                     logln!(
-                        "STAT packets={} bytes={} send_err={} drops={} silent={} late={} read_bytes={} reads={} eofs={} ring_fill={} fifo_bytes={} fifo_max={} ch={} rate={} rs_in={} rs_out={} flows={} locked={}",
+                        "STAT packets={} bytes={} send_err={} drops={} silent={} late={} read_bytes={} reads={} eofs={} ring_fill={} fifo_bytes={} fifo_max={} ch={} rate={} rs_in={} rs_out={} flows={} locked={} pcm_render={} render_blocks={} limited={} peak={:.3}",
                         counters.packets,
                         counters.bytes,
                         counters.errors,
@@ -509,7 +533,11 @@ impl Daemon {
                         resampler.rs_in(),
                         resampler.rs_out(),
                         plan.len(),
-                        counters.locked
+                        counters.locked,
+                        u8::from(render_stage.is_some()),
+                        render_stage.as_ref().map_or(0, |stage| stage.rendered_blocks),
+                        render_stage.as_ref().map_or(0, |stage| stage.limited),
+                        render_stage.as_ref().map_or(0.0, |stage| stage.peak)
                     );
                 }
                 if read == 0 && !eof {
@@ -522,6 +550,7 @@ impl Daemon {
                                 resampler.as_mut(),
                                 &mut meter,
                                 &mut submitter,
+                                render_stage.as_mut(),
                             );
                         }
                     }
@@ -533,7 +562,13 @@ impl Daemon {
         // Exit path: flush the SRC tail and give the session a moment to play it.
         if let Some(active) = session.as_ref() {
             let source_channels = current.source_channels;
-            flush_frames(source_channels, resampler.as_mut(), &mut meter, &mut submitter);
+            flush_frames(
+                source_channels,
+                resampler.as_mut(),
+                &mut meter,
+                &mut submitter,
+                render_stage.as_mut(),
+            );
             let _ = submitter.flush(active);
             write_status(
                 active,
@@ -1519,6 +1554,16 @@ impl Submitter {
         self.frames += 1;
     }
 
+    /// Append one already-rendered planar f32 block (target layout, ROAR limiter output).
+    fn push_planar(&mut self, block: &[Vec<f32>], frames: usize) {
+        for frame in 0..frames {
+            for channel in 0..self.channels.min(block.len()) {
+                self.pending.push(block[channel][frame]);
+            }
+        }
+        self.frames += frames;
+    }
+
     fn flush(&mut self, session: &Session) -> Result<(), String> {
         while self.frames > 0 {
             // 480 frames = 10 ms at 48 kHz, well below the ring capacity.
@@ -1557,6 +1602,113 @@ impl Submitter {
         Ok(())
     }
 }
+/// PCM -> ROAR render stage: accumulates 480-frame blocks in source channel order, renders them
+/// to the configured target layout (channel-based element + IAMF downmix / EAR fallback) and hands
+/// target-layout planar f32 to the submitter. The ROAR look-ahead limiter is inside the renderer.
+struct PcmRenderStage {
+    renderer: dolby_pipeline::PcmRenderer,
+    source_layout_id: String,
+    target_layout_id: String,
+    in_planar: Vec<Vec<f32>>,
+    channels_in: usize,
+    channels_out: usize,
+    frames: usize,
+    filled: usize,
+    warned: bool,
+    rendered_blocks: u64,
+    limited: u64,
+    peak: f32,
+}
+
+impl PcmRenderStage {
+    fn new(source_layout: &str, target_layout: &str) -> Result<Self, String> {
+        let config = dolby_pipeline::PcmConfig::new(source_layout, target_layout, 480);
+        let renderer = dolby_pipeline::PcmRenderer::new(&config).map_err(|err| err.to_string())?;
+        let channels_in = renderer.source_layout().len();
+        let channels_out = renderer.target_layout().len();
+        Ok(Self {
+            renderer,
+            source_layout_id: source_layout.to_string(),
+            target_layout_id: target_layout.to_string(),
+            in_planar: vec![vec![0.0; 480]; channels_in],
+            channels_in,
+            channels_out,
+            frames: 480,
+            filled: 0,
+            warned: false,
+            rendered_blocks: 0,
+            limited: 0,
+            peak: 0.0,
+        })
+    }
+
+    fn matches(&self, source_layout_id: &str, target_layout_id: &str) -> bool {
+        self.source_layout_id == source_layout_id && self.target_layout_id == target_layout_id
+    }
+
+    fn reset(&mut self) {
+        self.filled = 0;
+    }
+
+    fn push(
+        &mut self,
+        frame: &[i32; MAX_CH],
+        channels: usize,
+        meter: &mut LevelMeter,
+        submitter: &mut Submitter,
+    ) {
+        if channels != self.channels_in {
+            if !self.warned {
+                self.warned = true;
+                logln!(
+                    "WARN PCM render: frame has {channels} channels, source layout expects {}",
+                    self.channels_in
+                );
+            }
+            return;
+        }
+        for (channel, samples) in self.in_planar.iter_mut().enumerate() {
+            samples[self.filled] = frame[channel] as f32 / 8_388_608.0;
+        }
+        self.filled += 1;
+        if self.filled == self.frames {
+            self.emit(meter, submitter);
+        }
+    }
+
+    fn finish(&mut self, meter: &mut LevelMeter, submitter: &mut Submitter) {
+        if self.filled == 0 {
+            return;
+        }
+        for channel in &mut self.in_planar {
+            for sample in channel[self.filled..self.frames].iter_mut() {
+                *sample = 0.0;
+            }
+        }
+        self.emit(meter, submitter);
+    }
+
+    fn emit(&mut self, meter: &mut LevelMeter, submitter: &mut Submitter) {
+        let frames = self.frames;
+        match self.renderer.render_block(&self.in_planar) {
+            Ok(block) => {
+                submitter.push_planar(&block, frames);
+                meter.add_planar(&block, frames);
+                self.rendered_blocks += 1;
+                self.limited = self.renderer.limited_samples();
+                self.peak = self.renderer.out_peak();
+            }
+            Err(err) => {
+                if !self.warned {
+                    self.warned = true;
+                    logln!("WARN PCM render failed: {err}");
+                }
+            }
+        }
+        self.filled = 0;
+    }
+}
+
 fn feed_frame(
     frame: &[i32; MAX_CH],
     channels: usize,
@@ -1564,14 +1716,23 @@ fn feed_frame(
     resampler: &mut dyn Resampler,
     meter: &mut LevelMeter,
     submitter: &mut Submitter,
+    mut render_stage: Option<&mut PcmRenderStage>,
 ) {
     if rate == crate::OUT_RATE {
-        meter.add_frame(frame, channels);
-        submitter.push(frame, channels);
+        match render_stage.as_mut() {
+            Some(stage) => stage.push(frame, channels, meter, submitter),
+            None => {
+                meter.add_frame(frame, channels);
+                submitter.push(frame, channels);
+            }
+        }
     } else {
-        let mut sink = |out: &[i32; MAX_CH]| {
-            meter.add_frame(out, channels);
-            submitter.push(out, channels);
+        let mut sink = |out: &[i32; MAX_CH]| match render_stage.as_mut() {
+            Some(stage) => stage.push(out, channels, meter, submitter),
+            None => {
+                meter.add_frame(out, channels);
+                submitter.push(out, channels);
+            }
         };
         resampler.push(frame, channels, &mut sink);
     }
@@ -1582,12 +1743,84 @@ fn flush_frames(
     resampler: &mut dyn Resampler,
     meter: &mut LevelMeter,
     submitter: &mut Submitter,
+    mut render_stage: Option<&mut PcmRenderStage>,
 ) {
-    let mut sink = |out: &[i32; MAX_CH]| {
-        meter.add_frame(out, channels);
-        submitter.push(out, channels);
-    };
-    resampler.flush(channels, &mut sink);
+    {
+        let mut sink = |out: &[i32; MAX_CH]| match render_stage.as_mut() {
+            Some(stage) => stage.push(out, channels, meter, submitter),
+            None => {
+                meter.add_frame(out, channels);
+                submitter.push(out, channels);
+            }
+        };
+        resampler.flush(channels, &mut sink);
+    }
+    if let Some(stage) = render_stage.as_mut() {
+        stage.finish(meter, submitter);
+    }
+}
+
+/// Pick the PCM layout plan: ROAR rendering when a target layout is configured and both layouts
+/// are ROAR-supported (channel-based element with the real source layout), otherwise the legacy
+/// strict intersection (no downmix, drop extra source channels).
+fn classify_pcm_layout(
+    cfg: &Config,
+    source_layout_id: &str,
+    source_channels: usize,
+    meta_layout: Option<&str>,
+    render_stage: &mut Option<PcmRenderStage>,
+    warned: &mut bool,
+) -> Result<LayoutPlan, String> {
+    if cfg.pcm_render && !cfg.layout.trim().is_empty() {
+        let target = cfg.layout.trim();
+        // The render stage is expensive (ROAR init) and keeps the limiter/look-ahead state, so
+        // build it once per (source, target) pair and reuse it across loop iterations.
+        if render_stage
+            .as_ref()
+            .is_some_and(|stage| stage.matches(source_layout_id, target))
+        {
+            let channels = render_stage.as_ref().map_or(0, |stage| stage.channels_out);
+            return Ok(rendered_layout_plan(target, source_layout_id, channels));
+        }
+        *render_stage = None;
+        match PcmRenderStage::new(source_layout_id, target) {
+            Ok(stage) => {
+                let channels = stage.channels_out;
+                *render_stage = Some(stage);
+                return Ok(rendered_layout_plan(target, source_layout_id, channels));
+            }
+            Err(err) => {
+                if !*warned {
+                    *warned = true;
+                    logln!(
+                        "WARN PCM ROAR render unavailable ({source_layout_id} -> {target}): {err}; falling back to strict layout intersection"
+                    );
+                }
+            }
+        }
+    } else {
+        *render_stage = None;
+    }
+    plan_layout(&cfg.layout, source_channels, meta_layout)
+}
+
+/// Wire layout when PCM goes through ROAR: the daemon submits target-layout PCM, so the session's
+/// input channel count and the SDP labels are the target layout (identity map).
+fn rendered_layout_plan(target: &str, source_layout: &str, channels: usize) -> LayoutPlan {
+    let labels: Vec<String> = crate::config::layout_labels(target)
+        .map(|labels| labels.iter().map(|label| (*label).to_string()).collect())
+        .unwrap_or_default();
+    LayoutPlan {
+        target: target.to_string(),
+        source: source_layout.to_string(),
+        output_layout: target.to_string(),
+        source_channels: channels,
+        channels,
+        labels,
+        map: (0..channels).collect(),
+        missing: Vec::new(),
+        dropped: Vec::new(),
+    }
 }
 
 fn make_resampler(
@@ -2124,3 +2357,103 @@ fn write_status(
     };
     status::publish(&snapshot);
     let _ = parts.submitted;}
+#[cfg(test)]
+mod pcm_render_tests {
+    use super::*;
+
+    fn tone(frames: usize, freq: f32, amplitude: f32) -> Vec<f32> {
+        (0..frames)
+            .map(|index| {
+                let w = 2.0 * std::f32::consts::PI * freq * index as f32 / crate::OUT_RATE as f32;
+                amplitude * w.sin()
+            })
+            .collect()
+    }
+
+    fn channel_energy(pending: &[f32], channels: usize) -> Vec<f32> {
+        let mut sums = vec![0.0f32; channels];
+        for frame in pending.chunks_exact(channels) {
+            for (channel, &sample) in frame.iter().enumerate() {
+                sums[channel] += sample * sample;
+            }
+        }
+        sums
+    }
+
+    #[test]
+    fn pcm_render_stage_folds_712_into_512() {
+        let mut stage = PcmRenderStage::new("7.1.2", "5.1.2").expect("stage");
+        assert_eq!(stage.channels_in, 10);
+        assert_eq!(stage.channels_out, 8);
+        let mut meter = LevelMeter::default();
+        let mut submitter = Submitter::new(8);
+        // 7.1.2 order: L R C LFE Ls Rs Lb Rb Tfl Tfr.
+        let lfe = tone(480, 60.0, 0.1);
+        let back = tone(480, 700.0, 0.5);
+        let top = tone(480, 900.0, 0.4);
+        let mut frame = [0_i32; MAX_CH];
+        for index in 0..480 {
+            frame = [0_i32; MAX_CH];
+            frame[3] = (lfe[index] * 8_388_608.0) as i32; // LFE
+            frame[6] = (back[index] * 8_388_608.0) as i32; // Lb
+            frame[7] = (back[index] * 8_388_608.0) as i32; // Rb
+            frame[8] = (top[index] * 8_388_608.0) as i32; // Tfl
+            frame[9] = (top[index] * 8_388_608.0) as i32; // Tfr
+            stage.push(&frame, 10, &mut meter, &mut submitter);
+        }
+        assert_eq!(submitter.frames, 480);
+        assert_eq!(submitter.pending.len(), 480 * 8);
+        let energy = channel_energy(&submitter.pending, 8);
+        // 5.1.2 order: L R C LFE Ls Rs Tfl Tfr.
+        assert!(energy[3] > 0.1, "LFE did not pass through: {}", energy[3]);
+        assert!(energy[4] > 0.1, "Lb did not fold into Ls: {}", energy[4]);
+        assert!(energy[5] > 0.1, "Rb did not fold into Rs: {}", energy[5]);
+        assert!(energy[6] > 0.05, "Tfl missing: {}", energy[6]);
+        assert!(energy[7] > 0.05, "Tfr missing: {}", energy[7]);
+        assert_eq!(stage.rendered_blocks, 1);
+        assert!(stage.peak > 0.0);
+    }
+
+    #[test]
+    fn pcm_render_stage_same_layout_passes_channels_through() {
+        let mut stage = PcmRenderStage::new("5.1", "5.1").expect("stage");
+        let mut meter = LevelMeter::default();
+        let mut submitter = Submitter::new(6);
+        let levels = [0.1f32, 0.2, 0.3, 0.05, 0.15, 0.25];
+        let mut frame = [0_i32; MAX_CH];
+        // Two blocks: the limiter's 5 ms look-ahead delays the first block's tail, so the second
+        // block is where the steady-state level shows up.
+        for _ in 0..960 {
+            frame = [0_i32; MAX_CH];
+            for (channel, level) in levels.iter().enumerate() {
+                frame[channel] = (level * 8_388_608.0) as i32;
+            }
+            stage.push(&frame, 6, &mut meter, &mut submitter);
+        }
+        assert_eq!(submitter.frames, 960);
+        let second = &submitter.pending[480 * 6..];
+        let energy = channel_energy(second, 6);
+        for (channel, level) in levels.iter().enumerate() {
+            let expected = (level * level) * 480.0;
+            assert!(
+                (energy[channel] - expected).abs() < expected * 0.05 + 1e-3,
+                "channel {channel} level changed: got {} expected {}",
+                energy[channel],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn pcm_render_stage_unknown_source_layout_is_rejected() {
+        assert!(PcmRenderStage::new("4.1.2", "5.1.2").is_err());
+        // 4.1.2 must also be rejected by the classifier and fall back to the legacy plan.
+        let cfg = Config::default();
+        let mut stage = None;
+        let mut warned = false;
+        let plan = classify_pcm_layout(&cfg, "4.1.2", 7, None, &mut stage, &mut warned);
+        assert!(plan.is_ok());
+        assert!(stage.is_none());
+    }
+}
+

@@ -26,6 +26,20 @@ impl LevelMeter {
         self.frames += 1;
     }
 
+    /// Accumulate a planar f32 block (target layout order) produced by the ROAR renderer.
+    pub fn add_planar(&mut self, block: &[Vec<f32>], frames: usize) {
+        for c in 0..block.len().min(MAX_CH) {
+            let channel = &block[c];
+            let mut sumsq = 0.0f64;
+            for &sample in channel.iter().take(frames) {
+                let v = f64::from(sample) * 8_388_608.0;
+                sumsq += v * v;
+            }
+            self.sumsq[c] += sumsq;
+        }
+        self.frames += frames as u64;
+    }
+
     pub fn add_group(&mut self, frames: &[[i32; MAX_CH]], channels: usize) {
         for frame in frames {
             for c in 0..channels.min(MAX_CH) {
