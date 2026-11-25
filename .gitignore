@@ -28,10 +28,14 @@ build/
 .idea/
 local.properties
 
-# cargo vendor copies (recreatable)
-daemon-rs/vendor/
+# cargo vendor copies (recreatable): identical duplicate of
+# dolby-pipeline/vendor/eac3, which Cargo.toml actually uses.
+daemon-rs/vendor/eac3/
 
-# runtime binaries without extension
+# vendor blobs: never commit proprietary Amlogic/HAL binaries or build logs.
+# Build app-tv assets from source (device/haltee-proxy/build.ps1) or pull the
+# stock HAL from the device (see BUILD.md).
+*.orig
+app-tv/build.log
 app-tv/app/src/main/assets/haltee_rtp_sender
 app-tv/app/src/main/assets/audio.primary.amlogic.so
-.orig
