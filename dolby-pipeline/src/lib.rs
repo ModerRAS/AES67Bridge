@@ -23,6 +23,7 @@ pub mod decode;
 pub mod layout;
 pub mod n03;
 pub mod oamd;
+pub mod pcm;
 pub mod render;
 
 /// Pipeline error type.
@@ -64,6 +65,7 @@ pub use decode::{AuAssembler, DecodeMode, DecodeStats, DecodedAu, DecodedBlock, 
 pub use layout::{intersect, ChannelId, LayoutAdapter, LayoutIntersection, LayoutMode, LayoutSpec, IntersectionAdapter};
 pub use n03::{N03Block, N03Record, BED_LAYOUT_714, BED_TYPES, PROPERTY_BYTES};
 pub use oamd::{from_oamd, gain_db_to_linear, ObjectAttr, ObjectMetadata};
+pub use pcm::{PcmConfig, PcmRenderer};
 pub use render::{ObjectRenderer, RenderConfig};
 
 /// Crate version string (for status/diagnostics).
