@@ -57,7 +57,9 @@ impl From<aom_roar::OarError> for PipelineError {
 pub type Result<T> = std::result::Result<T, PipelineError>;
 
 pub use bits::{Codec, EsNormalizer, TrueHdAuHeader};
-pub use blocks::{Block, BlockChain, BlockPipeline, BlockProcessor, IdentityProcessor, ObjectPipeline};
+pub use blocks::{
+    Block, BlockChain, BlockPipeline, BlockProcessor, IdentityProcessor, ObjectPipeline, RenderStats,
+};
 pub use decode::{AuAssembler, DecodeMode, DecodeStats, DecodedAu, DecodedBlock, TrueHdDecoder, AU_SAMPLES, BLOCK_FRAMES, MAX_OBJECTS, SAMPLE_RATE};
 pub use layout::{intersect, ChannelId, LayoutAdapter, LayoutIntersection, LayoutMode, LayoutSpec, IntersectionAdapter};
 pub use n03::{N03Block, N03Record, BED_LAYOUT_714, BED_TYPES, PROPERTY_BYTES};

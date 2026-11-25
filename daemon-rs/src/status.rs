@@ -23,6 +23,10 @@ pub struct BitsStatus<'a> {
     pub decode_render_ms_p99: f64,
     pub decode_errors: u64,
     pub extract_errors: u64,
+    /// Output samples that reached the ROAR limiter ceiling (would have clipped before).
+    pub limited: u64,
+    /// Maximum absolute renderer output sample (linear; <= limiter ceiling).
+    pub out_peak: f32,
     pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -160,14 +164,16 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     if let Some(bits) = snapshot.bits {
         let _ = writeln!(
             out,
-            "\"sap\":{{\"enabled\":{},\"interval_s\":{}}},\"bits\":{{\"object_count\":{},\"decode_render_ms_p50\":{:.3},\"decode_render_ms_p99\":{:.3},\"decode_errors\":{},\"extract_errors\":{}}}}}",
+            "\"sap\":{{\"enabled\":{},\"interval_s\":{}}},\"bits\":{{\"object_count\":{},\"decode_render_ms_p50\":{:.3},\"decode_render_ms_p99\":{:.3},\"decode_errors\":{},\"extract_errors\":{},\"limited\":{},\"out_peak\":{:.4}}}}}",
             u8::from(snapshot.sap),
             snapshot.sap_interval_s,
             bits.object_count,
             bits.decode_render_ms_p50,
             bits.decode_render_ms_p99,
             bits.decode_errors,
-            bits.extract_errors
+            bits.extract_errors,
+            bits.limited,
+            bits.out_peak
         );
     } else {
         let _ = writeln!(

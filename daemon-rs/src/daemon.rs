@@ -1314,6 +1314,7 @@ impl Daemon {
                             _marker: std::marker::PhantomData,
                         };
                         let stats = pipeline.decode_stats();
+                        let render = pipeline.render_stats();
                         let (push_p50, push_p99) = push_percentiles(&push_ms);
                         let bits_view = status::BitsStatus {
                             object_count: last_objects,
@@ -1321,12 +1322,14 @@ impl Daemon {
                             decode_render_ms_p99: push_p99,
                             decode_errors: stats.decode_errors,
                             extract_errors: stats.extract_errors,
+                            limited: render.limited_samples,
+                            out_peak: render.out_peak,
                             _marker: std::marker::PhantomData,
                         };
                         write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
                         meter.reset();
                         logln!(
-                            "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={}",
+                            "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={} limited={} out_peak={:.3} limiter_delay={}",
                             bytes_read,
                             blocks_out,
                             frames_out,
@@ -1334,7 +1337,10 @@ impl Daemon {
                             active.counters().errors,
                             active.ring_frames(),
                             stats.decode_errors,
-                            stats.extract_errors
+                            stats.extract_errors,
+                            render.limited_samples,
+                            render.out_peak,
+                            render.limiter_delay_samples
                         );
                     } else {
                         write_idle_status(cfg, self.ptp_mode);
@@ -1384,6 +1390,7 @@ impl Daemon {
                 _marker: std::marker::PhantomData,
             };
             let stats = pipeline.decode_stats();
+            let render = pipeline.render_stats();
             let (push_p50, push_p99) = push_percentiles(&push_ms);
             let bits_view = status::BitsStatus {
                 object_count: last_objects,
@@ -1391,6 +1398,8 @@ impl Daemon {
                 decode_render_ms_p99: push_p99,
                 decode_errors: stats.decode_errors,
                 extract_errors: stats.extract_errors,
+                limited: render.limited_samples,
+                out_peak: render.out_peak,
                 _marker: std::marker::PhantomData,
             };
             write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
@@ -1962,6 +1971,8 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         decode_render_ms_p99: 0.0,
         decode_errors: 0,
         extract_errors: 0,
+        limited: 0,
+        out_peak: 0.0,
         _marker: std::marker::PhantomData,
     };
     let snapshot = status::Snapshot {

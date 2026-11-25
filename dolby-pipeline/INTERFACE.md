@@ -1,7 +1,7 @@
 # dolby-pipeline（AES67Bridge Dolby 对象管线）集成契约
 
 版本 0.1.0（2026-11-25）。目标读者：daemon-rs / app-tv / device 侧集成者。
-本文件是 **桥（bridge）与 AES67 daemon 的接口契约**，也是"桥内 DSP 范围 = 无"的边界声明。
+本文件是 **桥（bridge）与 AES67 daemon 的接口契约**，也是"桥内 DSP 范围"的边界声明（自研 DSP = 无；渲染器自带 limiter 默认开，见 §5）。
 
 ---
 
@@ -10,7 +10,7 @@
 1. **输入**：daemon 持续读 `/data/haltee/live.bits`（TrueHD/AC3/E-AC3/DTS 原始字节流），把读到的字节**原样**交给 `dolby_pipeline::ObjectPipeline::push_bits(&[u8])`。不要剥 4B、不要找 IEC61937 前导、不要按 burst 切分（阶段 0 结论，见 `artifacts/aes67/roar-armv7-bench-2026-11-24.md` §4）。
 2. **输出**：`push_bits` 返回 `Vec<dolby_pipeline::Block>`（每次 0..N 个）。每个 Block = **480 帧（48 kHz 下 10 ms）、planar f32、按 `Block::actual` 布局排列**。daemon 负责 L16/L24 打包、按 ≤8ch 拆流、RTP/SDP/status；**SDP 与 status 必须发布 `Block::actual` 的布局（标签/通道数/流数）**，不是 target。
 3. **布局**：target = 启动时向后端声明的最大布局（daemon.conf `layout=`）；actual = target ∩ source 的交集。source 多出的通道**丢弃 + warning，不做下混**；target 缺的通道**不补**。strict 是唯一实现；`layout_mode=upmix|downmix|auto` 目前**直接拒绝**（不是 warning 后静默启用）。
-4. **桥内不做任何 DSP**：无 EQ/分频/延迟/房间校正/上混/下混/DRC/dialnorm/limiter。只做"对象→扬声器"的 ROAR 渲染、bed 12ch→目标布局的 ROAR 映射、通道身份/布局交集。预留 `BlockProcessor` 链（默认空、逐字节透明）作为**将来**的 post-render per-channel 插入点；当前不实现、不启用。
+4. **桥内不做自研 DSP**：无 EQ/分频/延迟/房间校正/上混/下混/DRC/dialnorm。只做"对象→扬声器"的 ROAR 渲染、bed 12ch→目标布局的 ROAR 映射、通道身份/布局交集。**唯一例外**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启（−1 dBFS 上限、5 ms look-ahead、硬削波兜底），用于把渲染后超过满刻度的峰值限制住，避免 L24 转换削波；它是渲染器内部能力，不是桥自研 DSP，可通过 `RenderConfig::limiter=false` 关闭。预留 `BlockProcessor` 链（默认空、逐字节透明）仍作为将来 post-render per-channel 插入点。
 5. **采样率**：管线固定 48 kHz（TrueHD 码流本身 48k；ROAR 侧 48k）。44.1k PCM 源由 daemon 在进桥前做 SRC（AES67 传输格式要求，不算音频调校 DSP）。
 6. **失败降级**：解码错误/码流缺口 → 丢弃到下一个 major sync 继续；对象数 >128 → 该 AU 丢弃并计数；ROAR 渲染错误 → 返回 Err，daemon 重建管线（可选 bed-only 降级）；4.1.2 target → 启动期拒绝（ROAR validated patch 无 412 Layout）。
 7. **实测**（Z9X armv7，release，单线程 解码+渲染+块组装）：`bits_20`（5.483 s Atmos）耗时 2.677 s ≈ **4.9 ms / 10 ms 块**；`bits_19` 2.023 s → 0.897 s。分线程（解码/渲染各一线程）后每核约 20–25%，10 ms 节拍余量 >2×。
@@ -125,10 +125,11 @@ pub struct Block {
 
 ---
 
-## 5. DSP 边界（桥内 DSP = 无）
+## 5. DSP 边界（桥内自研 DSP = 无；渲染器自带 limiter 默认开）
 
-- **桥内不实现、不启用任何 DSP**：EQ、分频、延迟、房间校正、上混/下混、DRC/dialnorm、limiter 全部不做。这些属于"靠近音箱端/后级"的处理。
-- 唯一的插入点（预留给将来，**默认空链**）：
+- **桥内不实现、不启用任何自研 DSP**：EQ、分频、延迟、房间校正、上混/下混、DRC/dialnorm 不做。这些属于"靠近音箱端/后级"的处理。
+- **例外（2026-11-25 决策）**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启，上限 −1 dBFS、look-ahead 5 ms、attack 1 ms、release 200 ms、硬削波兜底（AOM 实现，实时零分配）。理由：ROAR 渲染输出的峰值实测可达 1.13–1.46（>0 dBFS），直接定标到 L24 会削波；limiter 把峰值限制在 −1 dBFS 以内。关闭方式：`RenderConfig::limiter = false`。启用后输出有 5 ms（240 样本）延迟，末块尾部由 daemon 丢帧即可（连续流不影响）。
+- 唯一的**自研**插入点（预留给将来，**默认空链**）：
 
 `rust
 pub trait BlockProcessor {

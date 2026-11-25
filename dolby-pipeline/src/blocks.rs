@@ -236,6 +236,19 @@ pub struct LayoutIntersectionSummary {
     pub target: LayoutSpec,
 }
 
+/// Renderer output statistics (limiter + peak metering), for daemon status/logging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderStats {
+    /// ROAR look-ahead peak limiter is enabled on the output.
+    pub limiter: bool,
+    /// Limiter look-ahead delay in samples per channel (0 when disabled).
+    pub limiter_delay_samples: usize,
+    /// Output samples that reached the limiter ceiling (would have clipped without it).
+    pub limited_samples: u64,
+    /// Maximum absolute output sample seen so far (linear, 1.0 = 0 dBFS).
+    pub out_peak: f32,
+}
+
 /// End-to-end object pipeline: TrueHD decoder + 480-frame assembler + ROAR renderer + block
 /// pipeline. This is the integration point the daemon uses.
 pub struct ObjectPipeline {
@@ -316,6 +329,16 @@ impl ObjectPipeline {
 
     pub fn decode_stats(&self) -> crate::decode::DecodeStats {
         self.decoder.stats()
+    }
+
+    /// Renderer/limiter statistics for the daemon status line.
+    pub fn render_stats(&self) -> RenderStats {
+        RenderStats {
+            limiter: self.renderer.limiter_enabled(),
+            limiter_delay_samples: self.renderer.limiter_delay(),
+            limited_samples: self.renderer.limited_samples(),
+            out_peak: self.renderer.out_peak(),
+        }
     }
 
     pub fn es_codec(&self) -> crate::bits::Codec {

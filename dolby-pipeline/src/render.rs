@@ -11,13 +11,16 @@
 //! 2. submit one grouped object-batch element + one 12ch 7.1.4 bed element,
 //! 3. render to planar f32 in ROAR speaker order (caller maps it to the daemon layout order).
 //!
-//! No DSP: this module does not mix down/up, EQ, delay or limit; it only spatialises objects and
-//! maps the 7.1.4 bed onto the target layout (ROAR's bed renderer).
+//! No bridge-side DSP: this module does not mix down/up, EQ or delay; it only spatialises objects
+//! and maps the 7.1.4 bed onto the target layout (ROAR's bed renderer). The only signal processing
+//! is ROAR's own look-ahead peak limiter on the final output, enabled by default (-1 dBFS ceiling,
+//! 5 ms look-ahead) so rendered peaks above full scale cannot clip the L24 conversion; see
+//! [`RenderConfig::limiter`] and [`RenderConfig::limiter_threshold_db`].
 
 use aom_roar::{
-    AudioElementConfig, CartesianCoordinate, ChannelBasedConfig, Config, GroupId, InputLayout,
-    ObjectBasedConfig, ObjectPosition, OutputLayout, PlanarBufferMut, PlanarBufferRef, RoarRenderer,
-    SampleRate, Samples,
+    AudioElementConfig, CartesianCoordinate, ChannelBasedConfig, Config, Decibels, GroupId,
+    InputLayout, LinearGain, ObjectBasedConfig, ObjectPosition, OutputLayout, PlanarBufferMut,
+    PlanarBufferRef, RoarRenderer, SampleRate, Samples,
 };
 use crate::decode::DecodedBlock;
 use crate::layout::{LayoutSpec};
@@ -37,11 +40,29 @@ pub struct RenderConfig {
     pub frames: usize,
     /// Hard cap for dynamic objects; values above 128 are rejected.
     pub max_objects: usize,
+    /// Enable ROAR's look-ahead peak limiter on the final output (default on).
+    pub limiter: bool,
+    /// Limiter ceiling in dBFS (default -1.0, ROAR's own default).
+    pub limiter_threshold_db: f32,
 }
 
 impl RenderConfig {
     pub fn new(target: impl Into<String>, frames: usize) -> Self {
-        Self { target: target.into(), frames, max_objects: crate::decode::MAX_OBJECTS }
+        Self {
+            target: target.into(),
+            frames,
+            max_objects: crate::decode::MAX_OBJECTS,
+            limiter: true,
+            limiter_threshold_db: -1.0,
+        }
+    }
+
+    /// Renderer config with the limiter off (bit-transparent output; used by tests that
+    /// assert pre-limiter levels).
+    pub fn without_limiter(target: impl Into<String>, frames: usize) -> Self {
+        let mut config = Self::new(target, frames);
+        config.limiter = false;
+        config
     }
 }
 
@@ -89,6 +110,10 @@ pub struct ObjectRenderer {
     obj_scratch: Vec<Vec<f32>>,
     max_objects: usize,
     rendered_blocks: u64,
+    limiter: bool,
+    limiter_ceiling: f32,
+    limited_samples: u64,
+    out_peak: f32,
 }
 
 impl ObjectRenderer {
@@ -149,6 +174,19 @@ impl ObjectRenderer {
                 out_channels
             )));
         }
+        let limiter_ceiling = LinearGain::from(
+            Decibels::new(config.limiter_threshold_db)
+                .map_err(|e| PipelineError::Config(format!("limiter threshold: {e:?}")))?,
+        )
+        .value();
+        if config.limiter {
+            rdr.enable_limiter(true)
+                .map_err(|e| PipelineError::Render(format!("enable limiter: {e:?}")))?;
+            rdr.set_limiter_threshold(Decibels::new(config.limiter_threshold_db).map_err(|e| {
+                PipelineError::Config(format!("limiter threshold: {e:?}"))
+            })?)
+            .map_err(|e| PipelineError::Render(format!("set limiter threshold: {e:?}")))?;
+        }
         Ok(Self {
             frames: samples,
             rdr,
@@ -164,6 +202,10 @@ impl ObjectRenderer {
             obj_scratch: Vec::new(),
             max_objects: config.max_objects,
             rendered_blocks: 0,
+            limiter: config.limiter,
+            limiter_ceiling,
+            limited_samples: 0,
+            out_peak: 0.0,
         })
     }
 
@@ -182,6 +224,31 @@ impl ObjectRenderer {
 
     pub fn rendered_blocks(&self) -> u64 {
         self.rendered_blocks
+    }
+
+    /// Whether the ROAR look-ahead peak limiter is enabled on the output.
+    pub fn limiter_enabled(&self) -> bool {
+        self.limiter
+    }
+
+    /// Limiter look-ahead delay in samples per channel (0 when disabled).
+    pub fn limiter_delay(&self) -> usize {
+        self.limiter_delay_samples()
+    }
+
+    fn limiter_delay_samples(&self) -> usize {
+        if self.limiter { self.rdr.limiter_delay() } else { 0 }
+    }
+
+    /// Samples that reached the limiter ceiling since the renderer was created (a sample at the
+    /// ceiling means the limiter applied gain reduction there; a proxy for "would have clipped").
+    pub fn limited_samples(&self) -> u64 {
+        self.limited_samples
+    }
+
+    /// Maximum absolute output sample observed since the renderer was created.
+    pub fn out_peak(&self) -> f32 {
+        self.out_peak
     }
 
     /// Set the number of dynamic objects carried by the grouped batch element. Recreates the
@@ -306,6 +373,29 @@ impl ObjectRenderer {
             }
         }
         self.rendered_blocks += 1;
+        // Measure the output (post-limiter) before handing it over: peak and how often the
+        // limiter ceiling was reached. A sample at the ceiling marks gain reduction, i.e. content
+        // that would have clipped without the limiter.
+        if self.limiter {
+            let ceiling = self.limiter_ceiling;
+            let mut peak = 0.0f32;
+            let mut limited = 0u64;
+            for channel in &self.out_scratch {
+                for &sample in channel.iter() {
+                    let magnitude = sample.abs();
+                    if magnitude > peak {
+                        peak = magnitude;
+                    }
+                    if magnitude >= ceiling * (1.0 - 1.0e-6) {
+                        limited += 1;
+                    }
+                }
+            }
+            if peak > self.out_peak {
+                self.out_peak = peak;
+            }
+            self.limited_samples += limited;
+        }
         // 3) hand the planar output to the caller; replace the scratch for the next block.
         Ok(std::mem::replace(
             &mut self.out_scratch,
@@ -466,6 +556,29 @@ mod tests {
             total < total_unity * 0.35 && total > total_unity * 0.15,
             "gain -6 dB not applied ({total} vs {total_unity})"
         );
+    }
+
+    #[test]
+    fn limiter_keeps_output_within_ceiling() {
+        let mut renderer = ObjectRenderer::new(&RenderConfig::new("7.1.4", 480)).unwrap();
+        assert!(renderer.limiter_enabled());
+        // +6 dB over full scale on every bed channel would clip without the limiter.
+        let mut block = sine_block(0.0, 0, &[]);
+        for channel in block.bed.iter_mut() {
+            channel.fill(2.0);
+        }
+        let out = renderer.render_block(&block).unwrap();
+        let peak = out
+            .iter()
+            .flat_map(|channel| channel.iter())
+            .fold(0.0f32, |max, sample| max.max(sample.abs()));
+        let ceiling = 0.891_251; // -1 dBFS
+        assert!(peak <= ceiling + 1.0e-4, "limiter ceiling exceeded: peak {peak}");
+        assert!(renderer.limited_samples() > 0, "limiter never engaged");
+        assert!(renderer.out_peak() <= ceiling + 1.0e-4);
+        assert!(renderer.limiter_delay() > 0);
+        // Filtering every sample through a look-ahead limiter must stay finite.
+        assert!(out.iter().all(|channel| channel.iter().all(|s| s.is_finite())));
     }
 
     #[test]

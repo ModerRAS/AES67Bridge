@@ -22,13 +22,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let blocks = pipeline.push_bits(&bytes)?;
     let elapsed = started.elapsed();
     let stats = pipeline.decode_stats();
+    let render = pipeline.render_stats();
     println!(
-        "target={target} codec={} blocks={} wall={:.3} ms decode_aus={} decode_errs={}",
+        "target={target} codec={} blocks={} wall={:.3} ms decode_aus={} decode_errs={} limiter={} limiter_delay={} limited_samples={} out_peak={:.6}",
         pipeline.es_codec().as_str(),
         blocks.len(),
         elapsed.as_secs_f64() * 1e3,
         stats.aus_decoded,
-        stats.decode_errors
+        stats.decode_errors,
+        render.limiter,
+        render.limiter_delay_samples,
+        render.limited_samples,
+        render.out_peak
     );
     for block in blocks.iter().take(3) {
         let energy: Vec<f64> = block
