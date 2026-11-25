@@ -1,6 +1,6 @@
 //! Offline TrueHD decode probe: ES/bits -> decode statistics (and optional 7.1.4 f32 WAV).
 //!
-//! Usage: decode-probe <file> [--wav out.wav] [--blocks N]
+//! Usage: decode-probe <file> [--wav out.wav] [--blocks N] [--chunk BYTES]
 
 use dolby_pipeline::decode::{BLOCK_FRAMES, I32_PCM_FULL_SCALE};
 use dolby_pipeline::{ObjectPipeline, TrueHdDecoder};
@@ -42,10 +42,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .position(|a| a == "--blocks")
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok());
+    // Feed in fixed chunks: a live FIFO delivers arbitrary byte blocks, so this reproduces the
+    // daemon's incremental feed and shows whether extractor diagnostics depend on chunking.
+    let chunk: Option<usize> = args
+        .iter()
+        .position(|a| a == "--chunk")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok());
 
     // Full decode statistics.
     let mut decoder = TrueHdDecoder::new();
-    let aus = decoder.push_es(&bytes);
+    let mut aus = Vec::new();
+    match chunk {
+        Some(chunk) if chunk > 0 => {
+            for part in bytes.chunks(chunk) {
+                aus.extend(decoder.push_es(part));
+            }
+        }
+        _ => aus = decoder.push_es(&bytes),
+    }
     let stats = decoder.stats();
     println!(
         "decode: es_bytes={} aus={} major_syncs={} skipped_pre_sync={} extract_errs={} parse_errs={} decode_errs={} oamd_payloads={}",

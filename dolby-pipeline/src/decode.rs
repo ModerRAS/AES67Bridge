@@ -374,7 +374,11 @@ impl TrueHdDecoder {
             let frame = match item {
                 Ok(frame) => frame,
                 Err(_error) => {
-                    self.stats.extract_errors += 1;
+                    // `InsufficientData` is the extractor's normal end-of-buffer signal: a live
+                    // FIFO delivers arbitrary byte blocks, so every push that ends in the middle
+                    // of an access unit yields one. Real rejects (invalid length, CRC, parity,
+                    // substream mismatch) are counted by the extractor itself and mirrored into
+                    // `extract_errors` after the loop, so do not count here.
                     continue;
                 }
             };
@@ -448,6 +452,8 @@ impl TrueHdDecoder {
                 }
             }
         }
+        // Mirror the extractor's own reject counter (real anomalies only, no InsufficientData).
+        self.stats.extract_errors = self.extractor.error_count() as u64;
         out
     }
 

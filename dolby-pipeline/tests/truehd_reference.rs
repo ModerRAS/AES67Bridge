@@ -352,3 +352,33 @@ fn presentation_rearm_handles_layout_change_mid_stream() {
     assert!((2_400..=2_430).contains(&object_aus), "object AUs: {object_aus}");
     assert!(!aus.last().unwrap().objects.is_empty(), "decoder must be back in Atmos mode");
 }
+
+/// A live FIFO hands the decoder arbitrary byte blocks. Every push that ends in the middle of an
+/// access unit makes the extractor report its normal `InsufficientData` end-of-buffer signal; that
+/// must not be counted as `extract_errors` (real rejects are counted by the extractor itself).
+#[test]
+fn chunked_feed_does_not_inflate_extract_errors() {
+    let Some(es) = evidence("bits_19_fmt0e000000.bin") else {
+        eprintln!("skip: bits_19 evidence missing");
+        return;
+    };
+    let mut whole = TrueHdDecoder::new();
+    let whole_aus = whole.push_es(&es);
+    let whole_stats = whole.stats();
+
+    let mut chunked = TrueHdDecoder::new();
+    let mut chunked_aus = 0usize;
+    for part in es.chunks(1024) {
+        chunked_aus += chunked.push_es(part).len();
+    }
+    let chunked_stats = chunked.stats();
+
+    assert_eq!(whole_aus.len(), chunked_aus, "chunking must not change decoded AUs");
+    assert_eq!(whole_stats.aus_decoded, chunked_stats.aus_decoded);
+    assert_eq!(whole_stats.parse_errors, chunked_stats.parse_errors);
+    assert_eq!(whole_stats.decode_errors, chunked_stats.decode_errors);
+    assert_eq!(
+        whole_stats.extract_errors, chunked_stats.extract_errors,
+        "chunking must not inflate extract_errors (whole={whole_stats:?} chunked={chunked_stats:?})"
+    );
+}
