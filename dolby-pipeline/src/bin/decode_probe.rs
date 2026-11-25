@@ -58,6 +58,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats.decode_errors,
         stats.oamd_payloads
     );
+    let dialnorm = decoder.dialnorm();
+    println!(
+        "dialnorm: twoch={} sixch={} eightch={} sixteench={} lfe_present={} dyn_object_only={}",
+        dialnorm.twoch,
+        dialnorm.sixch,
+        dialnorm.eightch,
+        dialnorm.sixteench,
+        dialnorm.lfe_present,
+        dialnorm.dyn_object_only
+    );
     if let Some(au) = aus.first() {
         println!(
             "first AU: samples={} p2_ch={} p3_ch={} objects={}",

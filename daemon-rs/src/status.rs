@@ -27,6 +27,8 @@ pub struct BitsStatus<'a> {
     pub limited: u64,
     /// Maximum absolute renderer output sample (linear; <= limiter ceiling).
     pub out_peak: f32,
+    /// Dialogue-normalisation constant gain currently applied before rendering (dB).
+    pub dialnorm_db: f32,
     pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -164,7 +166,7 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     if let Some(bits) = snapshot.bits {
         let _ = writeln!(
             out,
-            "\"sap\":{{\"enabled\":{},\"interval_s\":{}}},\"bits\":{{\"object_count\":{},\"decode_render_ms_p50\":{:.3},\"decode_render_ms_p99\":{:.3},\"decode_errors\":{},\"extract_errors\":{},\"limited\":{},\"out_peak\":{:.4}}}}}",
+            "\"sap\":{{\"enabled\":{},\"interval_s\":{}}},\"bits\":{{\"object_count\":{},\"decode_render_ms_p50\":{:.3},\"decode_render_ms_p99\":{:.3},\"decode_errors\":{},\"extract_errors\":{},\"limited\":{},\"out_peak\":{:.4},\"dialnorm_db\":{:.2}}}}}",
             u8::from(snapshot.sap),
             snapshot.sap_interval_s,
             bits.object_count,
@@ -173,7 +175,8 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
             bits.decode_errors,
             bits.extract_errors,
             bits.limited,
-            bits.out_peak
+            bits.out_peak,
+            bits.dialnorm_db
         );
     } else {
         let _ = writeln!(

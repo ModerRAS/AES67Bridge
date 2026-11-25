@@ -258,6 +258,11 @@ pub struct ObjectPipeline {
     blocks: BlockPipeline,
     es: crate::bits::EsNormalizer,
     pub served_blocks: u64,
+    /// Latest dialogue-normalisation metadata from the decoder.
+    dialnorm: crate::decode::DialnormInfo,
+    /// Gain currently applied to bed/objects before rendering (dB, 0 = transparent).
+    dialnorm_gain_db: f32,
+    dialnorm_enabled: bool,
 }
 
 impl ObjectPipeline {
@@ -279,6 +284,9 @@ impl ObjectPipeline {
             blocks,
             es: crate::bits::EsNormalizer::new(),
             served_blocks: 0,
+            dialnorm: crate::decode::DialnormInfo::default(),
+            dialnorm_gain_db: 0.0,
+            dialnorm_enabled: true,
         })
     }
 
@@ -304,7 +312,39 @@ impl ObjectPipeline {
     }
 
     /// Render + publish one decoded 480-frame block.
+    /// Enable/disable the dialogue-normalisation constant gain (default on). Turning it off
+    /// restores a transparent renderer even when the stream carries a dialnorm code.
+    pub fn set_dialnorm_enabled(&mut self, enabled: bool) {
+        self.dialnorm_enabled = enabled;
+        if !enabled {
+            self.dialnorm_gain_db = 0.0;
+            self.renderer.set_input_gain(1.0);
+        }
+    }
+
+    /// Latest dialogue-normalisation metadata and the gain currently applied before rendering.
+    pub fn dialnorm(&self) -> crate::decode::DialnormInfo {
+        self.dialnorm
+    }
+
+    pub fn dialnorm_gain_db(&self) -> f32 {
+        self.dialnorm_gain_db
+    }
+
     pub fn render_decoded(&mut self, decoded: &DecodedBlock) -> Result<Block> {
+        if self.dialnorm_enabled {
+            self.dialnorm = self.decoder.dialnorm();
+            let channels = if decoded.object_mode && decoded.object_count > 0 {
+                decoded.p3_channels
+            } else {
+                decoded.p2_channels
+            };
+            let gain_db = self.dialnorm.gain_db(channels);
+            if (gain_db - self.dialnorm_gain_db).abs() > 1.0e-6 {
+                self.dialnorm_gain_db = gain_db;
+                self.renderer.set_input_gain(10f32.powf(gain_db / 20.0));
+            }
+        }
         let source = self.source_layout(decoded);
         let rendered = self.renderer.render_block(decoded)?;
         let sample_pos = decoded.sample_pos;

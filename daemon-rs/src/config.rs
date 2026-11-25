@@ -319,6 +319,9 @@ pub struct Config {
     /// IAMF downmix for legal target pairs, EAR otherwise). Default true: the wire
     /// layout becomes the configured target layout and the bridge owns downmix.
     pub pcm_render: bool,
+    /// Apply TrueHD dialogue normalisation as a constant pre-render gain. Default true;
+    /// code 31 (reference, -31 dBFS) is 0 dB, code 27 is -4 dB.
+    pub dialnorm: bool,
     pub codec: String,
     pub encoding: Encoding,
     pub mtu: usize,
@@ -374,6 +377,7 @@ impl Default for Config {
             layout: String::new(),
             layout_mode: "strict".to_string(),
             pcm_render: true,
+            dialnorm: true,
             codec: "pcm".to_string(),
             encoding: Encoding::L24,
             mtu: crate::DEFAULT_MTU,
@@ -529,7 +533,7 @@ impl Config {
             "{program} usage: --fifo F --meta M [--seconds N] [--sched-fifo PRIO] [--sdp PATH] \
 [--status PATH] [--config PATH] [--lock PATH] [--group G] [--port P] \
 [--ptime-us 125|250|500|1000] [--maxch 2..16] [--layout 7.1] \
-[--layout-mode strict] [--pcm-render 1|0] [--bits /data/haltee/live.bits] \
+[--layout-mode strict] [--pcm-render 1|0] [--dialnorm 1|0] [--bits /data/haltee/live.bits] \
 [--bits-meta /data/haltee/live.bits.meta] \
 [--codec pcm|bits|auto|eac3|truehd|l16] [--encoding l24|l16] [--pt N] [--mtu 1500] [--target-layout L] \
 [--split] [--no-split] [--legacy-split] [--buffer-ms 100] [--prebuffer-ms 20] \
@@ -569,6 +573,7 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
         "bits_meta" => cfg.bits_meta = value.to_string(),
         "layout_mode" => cfg.layout_mode = value.trim().to_string(),
         "pcm_render" => cfg.pcm_render = parse_bool(value),
+        "dialnorm" => cfg.dialnorm = parse_bool(value),
         "split" => {
             // UI contract (lead decision 2026-11-24): split=1 is AES67 standard
             // multi-flow packing (flows of up to 8 channels, >8 channel sources
@@ -786,6 +791,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             "--layout-mode" => cfg.layout_mode = next(&mut index, args)?,
             "--pcm-render" => {
                 cfg.pcm_render = parse_bool(&next(&mut index, args)?);
+            }
+            "--dialnorm" => {
+                cfg.dialnorm = parse_bool(&next(&mut index, args)?);
             }
             "--split" => {
                 cfg.legacy_split = false;

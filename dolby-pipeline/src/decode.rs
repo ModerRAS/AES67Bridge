@@ -16,7 +16,6 @@
 
 use crate::bits::TrueHdAuHeader;
 use crate::layout::ChannelId;
-use crate::n03::BED_LAYOUT_714;
 use crate::oamd::{self, ObjectMetadata};
 use crate::{PipelineError, Result};
 use truehd::process::decode::{DecodedAccessUnit, Decoder};
@@ -34,6 +33,34 @@ pub const BLOCK_FRAMES: usize = 480;
 pub const I32_PCM_FULL_SCALE: f32 = (1u32 << 23) as f32;
 /// Hard cap: ROAR's patched OLR batch element accepts 1..=128 objects.
 pub const MAX_OBJECTS: usize = 128;
+/// Internal bed container size: 16 channels in 9.1.6 order. A smaller content bed (5.1/7.1/7.1.4)
+/// fills the matching speakers and leaves the rest silent, so a 9.1.6 bed (with Lw/Rw/Tsl/Tsr) is
+/// represented instead of having its channels silently dropped.
+pub const BED_CHANNELS: usize = 16;
+/// Bed container order (BS.2051 9.1.6): L R C LFE Ls Rs Lb Rb Lw Rw Tfl Tfr Tbl Tbr Tsl Tsr.
+pub const BED_LAYOUT_916: [ChannelId; 16] = [
+    ChannelId::FL,
+    ChannelId::FR,
+    ChannelId::FC,
+    ChannelId::LFE,
+    ChannelId::LS,
+    ChannelId::RS,
+    ChannelId::LRS,
+    ChannelId::RRS,
+    ChannelId::LW,
+    ChannelId::RW,
+    ChannelId::TFL,
+    ChannelId::TFR,
+    ChannelId::TBL,
+    ChannelId::TBR,
+    ChannelId::TSL,
+    ChannelId::TSR,
+];
+/// 7.1.4 speaker order used by presentation-2 `channel_assignment` fallbacks.
+const POSITIONAL_714: [ChannelId; 12] = [
+    ChannelId::FL, ChannelId::FR, ChannelId::FC, ChannelId::LFE, ChannelId::LS, ChannelId::RS,
+    ChannelId::LRS, ChannelId::RRS, ChannelId::TFL, ChannelId::TFR, ChannelId::TBL, ChannelId::TBR,
+];
 
 /// What the decoder is asked to produce.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -61,11 +88,64 @@ pub struct DecodeStats {
     pub discarded_samples: u64,
 }
 
+/// TrueHD dialogue-normalisation metadata from the latest major sync (FBA `channel_meaning`).
+///
+/// The raw fields are the per-configuration `dialogue_norm` codes from the Dolby TrueHD bitstream.
+/// A non-zero value means the programme's dialogue level is that many dB below full scale (Dolby
+/// normalises playback to a reference level by applying a constant gain derived from this value).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DialnormInfo {
+    pub twoch: u8,
+    pub sixch: u8,
+    pub eightch: u8,
+    pub sixteench: u8,
+    pub lfe_present: bool,
+    pub dyn_object_only: bool,
+}
+
+impl DialnormInfo {
+    /// Raw dialogue-normalisation code for a presentation channel count (0 = not specified).
+    pub fn code_for(&self, channels: usize) -> u8 {
+        match channels {
+            2 => self.twoch,
+            6 => self.sixch,
+            8 => self.eightch,
+            16 => self.sixteench,
+            _ => {
+                // Object presentations carry 12/16 channels; the 16ch field describes them, then
+                // fall back to the 8-channel bed value.
+                if self.sixteench != 0 { self.sixteench } else { self.eightch }
+            }
+        }
+    }
+
+    /// True when the stream carries any non-zero dialogue-normalisation value.
+    pub fn is_present(&self) -> bool {
+        self.twoch != 0 || self.sixch != 0 || self.eightch != 0 || self.sixteench != 0
+    }
+
+    /// Constant playback gain in dB implied by the dialogue-normalisation code for a presentation
+    /// channel count.
+    ///
+    /// Dolby's reference dialogue level is -31 dBFS: a code of N means the programme's dialogue
+    /// sits N dB below full scale, so the player applies `N - 31` dB (code 31 = reference = 0 dB,
+    /// code 27 = 4 dB of attenuation). Codes above 31 only occur in the 6-bit 2-channel field whose
+    /// encoding we do not assume, so they are ignored (0 dB) instead of guessed.
+    pub fn gain_db(&self, channels: usize) -> f32 {
+        let code = self.code_for(channels);
+        if (1..=31).contains(&code) {
+            f32::from(code) - 31.0
+        } else {
+            0.0
+        }
+    }
+}
+
 /// One decoded access unit (40 samples at 48 kHz), still unpacked.
 #[derive(Clone, Debug, Default)]
 pub struct DecodedAu {
     pub sample_length: usize,
-    /// 12-channel 7.1.4 bed in \`BED_LAYOUT_714\` order; missing channels are silence.
+    /// 16-channel 9.1.6 bed in \`BED_LAYOUT_916\` order; missing channels are silence.
     pub bed: Vec<Vec<f32>>,
     /// Dynamic object mono channels in OAMD id order.
     pub objects: Vec<Vec<f32>>,
@@ -116,16 +196,16 @@ fn label_to_channel(label: &ChannelLabel) -> Option<ChannelId> {
 }
 
 fn bed_slot(channel: ChannelId) -> Option<usize> {
-    BED_LAYOUT_714.iter().position(|&c| c == channel)
+    BED_LAYOUT_916.iter().position(|&c| c == channel)
 }
 
 fn pcm_f32(au: &DecodedAccessUnit, channel: usize, sample: usize) -> f32 {
     au.pcm_data[sample][channel] as f32 / I32_PCM_FULL_SCALE
 }
 
-/// Decoded presentation-2 (or fallback) bed into the 12-channel 7.1.4 bed.
+/// Decoded presentation-2 (or fallback) bed into the 16-channel 9.1.6 container.
 fn bed_from_channel_presentation(au: &DecodedAccessUnit) -> Vec<Vec<f32>> {
-    let mut bed = vec![vec![0.0f32; au.sample_length]; 12];
+    let mut bed = vec![vec![0.0f32; au.sample_length]; BED_CHANNELS];
     let count = au.channel_count.min(au.channel_labels.len().max(au.channel_count));
     let positional: Option<&[ChannelId]> = match au.channel_count {
         6 => Some(&[ChannelId::FL, ChannelId::FR, ChannelId::FC, ChannelId::LFE, ChannelId::LS, ChannelId::RS]),
@@ -139,6 +219,8 @@ fn bed_from_channel_presentation(au: &DecodedAccessUnit) -> Vec<Vec<f32>> {
             ChannelId::LRS,
             ChannelId::RRS,
         ]),
+        12 => Some(&POSITIONAL_714),
+        16 => Some(&BED_LAYOUT_916),
         _ => None,
     };
     for channel in 0..count {
@@ -229,6 +311,8 @@ pub struct TrueHdDecoder {
     required: [bool; 4],
     /// Set after a decode error: skip access units until the next major sync and re-lock.
     awaiting_major_sync: bool,
+    /// Dialogue-normalisation metadata from the latest major sync (major syncs only).
+    dialnorm: DialnormInfo,
 }
 
 impl Default for TrueHdDecoder {
@@ -257,7 +341,14 @@ impl TrueHdDecoder {
             mode: DecodeMode::Objects,
             required: [false, false, true, true],
             awaiting_major_sync: false,
+            dialnorm: DialnormInfo::default(),
         }
+    }
+
+    /// Dialogue-normalisation metadata from the most recent major sync (all-zero before the first
+    /// major sync). The pipeline applies it as a constant gain before rendering.
+    pub fn dialnorm(&self) -> DialnormInfo {
+        self.dialnorm
     }
 
     /// Bed-only decoder (presentation 2): no objects, no OAMD. Bit-exact with ffmpeg's 7.1 bed.
@@ -312,6 +403,19 @@ impl TrueHdDecoder {
                     continue;
                 }
             };
+            if let Some(ms) = au.major_sync_info.as_ref()
+                && let Some(cm) = ms.channel_meaning.fba()
+            {
+                let extra = cm.extra_channel_meaning.as_ref();
+                self.dialnorm = DialnormInfo {
+                    twoch: cm.twoch_dialogue_norm,
+                    sixch: cm.sixch_dialogue_norm,
+                    eightch: cm.eightch_dialogue_norm,
+                    sixteench: extra.map(|e| e.sixteench_dialogue_norm).unwrap_or(0),
+                    lfe_present: extra.map(|e| e.lfe_present).unwrap_or(false),
+                    dyn_object_only: extra.map(|e| e.dyn_object_only).unwrap_or(false),
+                };
+            }
             match self.decode_selected(&au) {
                 Ok(mut results) => {
                     let oamd_payloads =
@@ -374,7 +478,7 @@ impl TrueHdDecoder {
                         meta.dynamic_objects
                     )));
                 }
-                let mut bed = vec![vec![0.0f32; p3.sample_length]; 12];
+                let mut bed = vec![vec![0.0f32; p3.sample_length]; BED_CHANNELS];
                 for (channel_index, channel) in meta.bed_channels() {
                     let Some(slot) = bed_slot(channel) else { continue };
                     for sample in 0..p3.sample_length {
@@ -402,11 +506,13 @@ impl TrueHdDecoder {
                 });
             }
         }
-        // Channel-based fallback: the highest-channel presentation the stream actually carries.
-        // * Atmos before its first OAMD payload: presentation 2 (7.1).
+        // Channel-based fallback: the highest-channel presentation that is a real speaker bed.
+        // * Atmos before its first OAMD payload: presentation 2 (7.1); presentation 3 carries the
+        //   object channels and must NOT be interpreted as a speaker bed (it would map objects onto
+        //   fixed speaker positions).
         // * plain 5.1/7.1 TrueHD: presentation 2 resolves to a copy of presentation 1, so
         //   results[2] is None and the 6/8-channel presentation arrives in results[1].
-        let bed_source = [3usize, 2, 1, 0]
+        let bed_source = [2usize, 1, 0]
             .iter()
             .filter_map(|&index| results[index].as_ref())
             .max_by_key(|au| au.channel_count)
@@ -440,7 +546,7 @@ impl AuAssembler {
     pub fn new(frames: usize) -> Self {
         Self {
             frames,
-            bed: vec![vec![0.0; frames]; 12],
+            bed: vec![vec![0.0; frames]; BED_CHANNELS],
             objects: Vec::new(),
             filled: 0,
             sample_pos: 0,
@@ -468,7 +574,7 @@ impl AuAssembler {
     }
 
     pub fn push(&mut self, au: DecodedAu) -> Option<DecodedBlock> {
-        if au.bed.len() != 12 {
+        if au.bed.len() != BED_CHANNELS {
             return None;
         }
         self.ensure_objects(au.objects.len());
@@ -496,7 +602,7 @@ impl AuAssembler {
         let block = DecodedBlock {
             frames: self.frames,
             sample_pos: self.sample_pos,
-            bed: std::mem::replace(&mut self.bed, vec![vec![0.0; self.frames]; 12]),
+            bed: std::mem::replace(&mut self.bed, vec![vec![0.0; self.frames]; BED_CHANNELS]),
             objects: std::mem::take(&mut self.objects),
             metadata: self.metadata.take(),
             object_count: self.objects.len(),
@@ -547,13 +653,13 @@ pub fn first_au_header(es: &[u8]) -> Result<TrueHdAuHeader> {
 mod tests {
     use super::*;
 
-    /// Synthetic 480-frame block: 12 bed channels of constant value, N objects of constant value.
+    /// Synthetic 480-frame block: BED_CHANNELS bed channels of constant value, N objects of constant value.
     fn synthetic_block(objects: usize) -> DecodedBlock {
         let frames = BLOCK_FRAMES;
         DecodedBlock {
             frames,
             sample_pos: 0,
-            bed: (0..12).map(|c| vec![c as f32 + 1.0; frames]).collect(),
+            bed: (0..BED_CHANNELS).map(|c| vec![c as f32 + 1.0; frames]).collect(),
             objects: (0..objects).map(|o| vec![100.0 + o as f32; frames]).collect(),
             metadata: None,
             object_count: objects,
@@ -570,7 +676,7 @@ mod tests {
         for au_index in 0..24 {
             let au = DecodedAu {
                 sample_length: AU_SAMPLES,
-                bed: (0..12).map(|c| vec![au_index as f32 + c as f32; AU_SAMPLES]).collect(),
+                bed: (0..BED_CHANNELS).map(|c| vec![au_index as f32 + c as f32; AU_SAMPLES]).collect(),
                 objects: vec![vec![1.0f32; AU_SAMPLES]],
                 metadata: None,
                 p2_channels: 8,
@@ -597,7 +703,7 @@ mod tests {
             let objects = if au_index < 12 { 1 } else { 3 };
             let au = DecodedAu {
                 sample_length: AU_SAMPLES,
-                bed: vec![vec![0.0; AU_SAMPLES]; 12],
+                bed: vec![vec![0.0; AU_SAMPLES]; BED_CHANNELS],
                 objects: (0..objects).map(|o| vec![o as f32; AU_SAMPLES]).collect(),
                 metadata: None,
                 p2_channels: 8,
@@ -616,7 +722,7 @@ mod tests {
         let mut assembler = AuAssembler::new(BLOCK_FRAMES);
         let au = DecodedAu {
             sample_length: 100,
-            bed: vec![vec![0.0; 100]; 12],
+            bed: vec![vec![0.0; 100]; BED_CHANNELS],
             objects: Vec::new(),
             metadata: None,
             p2_channels: 8,
@@ -629,7 +735,7 @@ mod tests {
         for _ in 0..4 {
             let au = DecodedAu {
                 sample_length: 100,
-                bed: vec![vec![0.0; 100]; 12],
+                bed: vec![vec![0.0; 100]; BED_CHANNELS],
                 objects: Vec::new(),
                 metadata: None,
                 p2_channels: 8,
@@ -645,17 +751,50 @@ mod tests {
     }
 
     #[test]
-    fn layout_bed_slots_are_714() {
+    fn dialnorm_gain_uses_the_minus_31_dbfs_reference() {
+        let info = DialnormInfo {
+            eightch: 27,
+            ..Default::default()
+        };
+        assert!((info.gain_db(8) + 4.0).abs() < 1e-6, "27 -> -4 dB");
+        let reference = DialnormInfo {
+            eightch: 31,
+            ..Default::default()
+        };
+        assert_eq!(reference.gain_db(8), 0.0, "31 -> reference, 0 dB");
+        // Object presentations (12/16ch) prefer the 16-channel field.
+        let objects = DialnormInfo {
+            eightch: 31,
+            sixteench: 25,
+            ..Default::default()
+        };
+        assert!((objects.gain_db(12) + 6.0).abs() < 1e-6, "25 -> -6 dB");
+        // Unspecified (0) and out-of-range (6-bit 2ch field) codes are ignored.
+        assert_eq!(DialnormInfo::default().gain_db(8), 0.0);
+        assert_eq!(
+            DialnormInfo {
+                eightch: 37,
+                ..Default::default()
+            }
+            .gain_db(8),
+            0.0
+        );
+    }
+
+    #[test]
+    fn layout_bed_slots_are_916() {
         assert_eq!(bed_slot(ChannelId::FL), Some(0));
         assert_eq!(bed_slot(ChannelId::LRS), Some(6));
-        assert_eq!(bed_slot(ChannelId::TBR), Some(11));
-        assert_eq!(bed_slot(ChannelId::LW), None);
+        assert_eq!(bed_slot(ChannelId::TBR), Some(13));
+        // 9.1.6-only speakers are now represented instead of being dropped.
+        assert_eq!(bed_slot(ChannelId::LW), Some(8));
+        assert_eq!(bed_slot(ChannelId::TSL), Some(14));
     }
 
     #[test]
     fn synthetic_block_is_valid() {
         let block = synthetic_block(3);
-        assert_eq!(block.bed.len(), 12);
+        assert_eq!(block.bed.len(), BED_CHANNELS);
         assert_eq!(block.objects.len(), 3);
         assert_eq!(block.bed[0].len(), BLOCK_FRAMES);
     }

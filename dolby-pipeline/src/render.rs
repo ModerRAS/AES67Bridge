@@ -22,14 +22,13 @@ use aom_roar::{
     InputLayout, LinearGain, ObjectBasedConfig, ObjectPosition, OutputLayout, PlanarBufferMut,
     PlanarBufferRef, RoarRenderer, SampleRate, Samples,
 };
-use crate::decode::DecodedBlock;
+use crate::decode::{DecodedBlock, BED_CHANNELS};
 use crate::layout::{LayoutSpec};
 use crate::oamd::gain_db_to_linear;
 use crate::{PipelineError, Result};
 
 const BED_ID: u32 = 10_000; // NSP BED_ID
 const OBJ_ID: u32 = 1; // NSP grouped object element id
-const BED_CHANNELS: usize = 12;
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]
@@ -114,6 +113,8 @@ pub struct ObjectRenderer {
     limiter_ceiling: f32,
     limited_samples: u64,
     out_peak: f32,
+    /// Constant pre-render gain (dialnorm; 1.0 = transparent).
+    input_gain: f32,
 }
 
 impl ObjectRenderer {
@@ -151,13 +152,15 @@ impl ObjectRenderer {
         let group = rdr
             .add_audio_group()
             .map_err(|e| PipelineError::Render(format!("add_audio_group: {e:?}")))?;
-        // The bed is always a 12-channel 7.1.4 channel-based element (NSP does the same; ROAR's
-        // bed/ear renderer maps it onto the target layout). Missing bed channels are silence.
+        // The bed is a 16-channel 9.1.6 channel-based element: the decoder fills the speakers the
+        // content actually carries (5.1/7.1/7.1.4/9.1.6) and silences the rest, and ROAR's bed/ear
+        // renderer maps it onto the target layout. This keeps 9.1.6 bed channels (Lw/Rw/Tsl/Tsr)
+        // representable instead of silently dropping them.
         rdr.add_element(
             group,
             BED_ID,
             &AudioElementConfig::ChannelBased(ChannelBasedConfig {
-                layout: InputLayout::Layout714,
+                layout: InputLayout::Layout916,
                 downmix_info: None,
                 rendering_config: None,
             }),
@@ -206,6 +209,7 @@ impl ObjectRenderer {
             limiter_ceiling,
             limited_samples: 0,
             out_peak: 0.0,
+            input_gain: 1.0,
         })
     }
 
@@ -249,6 +253,15 @@ impl ObjectRenderer {
     /// Maximum absolute output sample observed since the renderer was created.
     pub fn out_peak(&self) -> f32 {
         self.out_peak
+    }
+
+    /// Constant gain applied to bed and object PCM before rendering (dialnorm; 1.0 = transparent).
+    pub fn input_gain(&self) -> f32 {
+        self.input_gain
+    }
+
+    pub fn set_input_gain(&mut self, gain: f32) {
+        self.input_gain = if gain.is_finite() { gain } else { 1.0 };
     }
 
     /// Set the number of dynamic objects carried by the grouped batch element. Recreates the
@@ -329,7 +342,8 @@ impl ObjectRenderer {
                 let attr = metadata.and_then(|m| m.dynamic().nth(index));
                 let position = attr.and_then(|a| a.position).unwrap_or([0.0, 0.0, -1.0]);
                 self.positions.push(Self::to_roar_cartesian(position)?);
-                let gain = attr.map(|a| gain_db_to_linear(a.gain_db)).unwrap_or(1.0);
+                let gain =
+                    attr.map(|a| gain_db_to_linear(a.gain_db)).unwrap_or(1.0) * self.input_gain;
                 let dst = &mut self.obj_scratch[index];
                 if gain == 1.0 {
                     dst.copy_from_slice(&samples[..frames]);
@@ -345,8 +359,15 @@ impl ObjectRenderer {
         }
 
         // 2) inputs + output buffers.
+        let input_gain = self.input_gain;
         for (dst, src) in self.bed_scratch.iter_mut().zip(block.bed.iter()) {
-            dst.copy_from_slice(&src[..frames]);
+            if input_gain == 1.0 {
+                dst.copy_from_slice(&src[..frames]);
+            } else {
+                for (d, &s) in dst.iter_mut().zip(src[..frames].iter()) {
+                    *d = s * input_gain;
+                }
+            }
         }
         for channel in self.out_scratch.iter_mut() {
             channel.fill(0.0);
@@ -437,7 +458,7 @@ mod tests {
 
     fn sine_block(_freq: f32, objects: usize, positions: &[[f64; 3]]) -> DecodedBlock {
         let frames = BLOCK_FRAMES;
-        let mut bed = vec![vec![0.0f32; frames]; 12];
+        let mut bed = vec![vec![0.0f32; frames]; BED_CHANNELS];
         for (c, channel) in bed.iter_mut().enumerate() {
             let w = 2.0 * std::f32::consts::PI * (100.0 + 50.0 * c as f32) / 48000.0;
             for (i, s) in channel.iter_mut().enumerate() {

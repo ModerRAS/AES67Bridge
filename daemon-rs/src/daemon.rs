@@ -1065,6 +1065,7 @@ impl Daemon {
         }
         let mut pipeline = dolby_pipeline::ObjectPipeline::new(&target)
             .map_err(|err| (EXIT_USAGE, format!("truehd pipeline init target={target} failed: {err}")))?;
+        pipeline.set_dialnorm_enabled(cfg.dialnorm);
         let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
             .ok_or((EXIT_USAGE, format!("unsupported ptime {} us", cfg.ptime_us)))?;
         let encoding = if cfg.encoding == Encoding::L24 {
@@ -1166,6 +1167,7 @@ impl Daemon {
                                     )
                                 },
                             )?;
+                            pipeline.set_dialnorm_enabled(cfg.dialnorm);
                             preroll.clear();
                             pending.clear();
                             started = false;
@@ -1359,12 +1361,13 @@ impl Daemon {
                             extract_errors: stats.extract_errors,
                             limited: render.limited_samples,
                             out_peak: render.out_peak,
+                            dialnorm_db: pipeline.dialnorm_gain_db(),
                             _marker: std::marker::PhantomData,
                         };
                         write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
                         meter.reset();
                         logln!(
-                            "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={} limited={} out_peak={:.3} limiter_delay={}",
+                            "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={} limited={} out_peak={:.3} limiter_delay={} dialnorm={:.2}dB",
                             bytes_read,
                             blocks_out,
                             frames_out,
@@ -1375,7 +1378,8 @@ impl Daemon {
                             stats.extract_errors,
                             render.limited_samples,
                             render.out_peak,
-                            render.limiter_delay_samples
+                            render.limiter_delay_samples,
+                            pipeline.dialnorm_gain_db()
                         );
                     } else {
                         write_idle_status(cfg, self.ptp_mode);
@@ -1435,6 +1439,7 @@ impl Daemon {
                 extract_errors: stats.extract_errors,
                 limited: render.limited_samples,
                 out_peak: render.out_peak,
+                dialnorm_db: pipeline.dialnorm_gain_db(),
                 _marker: std::marker::PhantomData,
             };
             write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
@@ -2206,6 +2211,7 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         extract_errors: 0,
         limited: 0,
         out_peak: 0.0,
+        dialnorm_db: 0.0,
         _marker: std::marker::PhantomData,
     };
     let snapshot = status::Snapshot {

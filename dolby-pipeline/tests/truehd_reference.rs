@@ -76,7 +76,7 @@ fn max_bed_diff_vs_ffmpeg(aus: &[dolby_pipeline::DecodedAu], reference: &[i32], 
     for (frame_index, au) in aus.iter().enumerate() {
         let base = frame_index * AU_SAMPLES;
         for (wave_channel, channel) in FFMPEG_71_ORDER.iter().enumerate() {
-            let bed_slot = dolby_pipeline::BED_LAYOUT_714.iter().position(|c| c == channel).unwrap();
+            let bed_slot = dolby_pipeline::BED_LAYOUT_916.iter().position(|c| c == channel).unwrap();
             for sample in 0..au.sample_length {
                 let ours = (au.bed[bed_slot][sample] * (1u32 << 23) as f32).round() as i32;
                 let theirs = reference[(base + sample) * channels + wave_channel];
@@ -232,7 +232,7 @@ fn device_5_1_truehd_dump2_decodes_with_presentation_fallback() {
     assert_eq!(samples, 218_680);
     assert!(aus.iter().all(|au| au.objects.is_empty()), "5.1 stream must not produce objects");
     assert!(aus.iter().all(|au| au.p2_channels == 6), "bed presentation is 5.1");
-    assert_eq!(aus[0].bed.len(), 12);
+    assert_eq!(aus[0].bed.len(), dolby_pipeline::BED_CHANNELS);
 
     // End-to-end: target 7.1.4 receives 5.1 content; published layout is the strict intersection.
     let mut pipeline = ObjectPipeline::new("7.1.4").expect("pipeline");

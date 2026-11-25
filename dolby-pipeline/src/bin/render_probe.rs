@@ -23,8 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = started.elapsed();
     let stats = pipeline.decode_stats();
     let render = pipeline.render_stats();
+    let dialnorm = pipeline.dialnorm();
     println!(
-        "target={target} codec={} blocks={} wall={:.3} ms decode_aus={} decode_errs={} limiter={} limiter_delay={} limited_samples={} out_peak={:.6}",
+        "target={target} codec={} blocks={} wall={:.3} ms decode_aus={} decode_errs={} limiter={} limiter_delay={} limited_samples={} out_peak={:.6} dialnorm={:.2}dB codes={}/{}/{}/{}",
         pipeline.es_codec().as_str(),
         blocks.len(),
         elapsed.as_secs_f64() * 1e3,
@@ -33,7 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         render.limiter,
         render.limiter_delay_samples,
         render.limited_samples,
-        render.out_peak
+        render.out_peak,
+        pipeline.dialnorm_gain_db(),
+        dialnorm.twoch,
+        dialnorm.sixch,
+        dialnorm.eightch,
+        dialnorm.sixteench
     );
     for block in blocks.iter().take(3) {
         let energy: Vec<f64> = block
