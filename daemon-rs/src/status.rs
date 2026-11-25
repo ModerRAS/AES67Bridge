@@ -187,73 +187,99 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
 // all clients that connected since the previous publish, then closes them.
 // The JSON file writer below is kept for the legacy C engine and for tests.
 
-use std::os::unix::io::FromRawFd;
-use std::os::unix::net::UnixListener;
-use std::sync::OnceLock;
-
-static STATUS_SOCKET: OnceLock<Option<UnixListener>> = OnceLock::new();
-
 /// Abstract LOCAL socket name used by the Rust daemon and the TV app.
 pub const SOCKET_NAME: &str = "aes67bridge.status";
 
-/// Bind an abstract LOCAL socket (Linux/Android `sun_path[0] = 0`).
-fn bind_abstract(name: &str) -> io::Result<UnixListener> {
-    let bytes = name.as_bytes();
-    unsafe {
-        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut addr: libc::sockaddr_un = std::mem::zeroed();
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        if bytes.len() + 1 > addr.sun_path.len() {
-            libc::close(fd);
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "socket name too long"));
-        }
-        for (i, byte) in bytes.iter().enumerate() {
-            addr.sun_path[i + 1] = *byte as libc::c_char;
-        }
-        let len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
-        if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) != 0 {
-            let err = io::Error::last_os_error();
-            libc::close(fd);
-            return Err(err);
-        }
-        if libc::listen(fd, 8) != 0 {
-            let err = io::Error::last_os_error();
-            libc::close(fd);
-            return Err(err);
-        }
-        Ok(UnixListener::from_raw_fd(fd))
-    }
-}
+// The channel is Linux/Android-only: abstract LOCAL sockets have no equivalent
+// on Windows, and host builds exist so `cargo test` can run. Elsewhere the
+// daemon logs the unsupported bind and keeps writing the JSON status file.
+#[cfg(unix)]
+mod socket {
+    use super::{render, Snapshot};
+    use std::io;
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::net::UnixListener;
+    use std::sync::OnceLock;
 
-/// Bind the abstract status socket. Call once, after the instance lock is held.
-pub fn init_socket(name: &str) -> io::Result<()> {
-    let listener = bind_abstract(name)?;
-    listener.set_nonblocking(true)?;
-    let _ = STATUS_SOCKET.set(Some(listener));
-    Ok(())
-}
+    static STATUS_SOCKET: OnceLock<Option<UnixListener>> = OnceLock::new();
 
-/// Publish one snapshot to every status client connected right now.
-pub fn publish(snapshot: &Snapshot<'_>) {
-    let body = render(snapshot);
-    let Some(Some(listener)) = STATUS_SOCKET.get() else {
-        return;
-    };
-    loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                use std::io::Write as _;
-                let _ = stream.write_all(body.as_bytes());
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+    /// Bind an abstract LOCAL socket (Linux/Android `sun_path[0] = 0`).
+    fn bind_abstract(name: &str) -> io::Result<UnixListener> {
+        let bytes = name.as_bytes();
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-            Err(_) => break,
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            if bytes.len() + 1 > addr.sun_path.len() {
+                libc::close(fd);
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "socket name too long"));
+            }
+            for (i, byte) in bytes.iter().enumerate() {
+                addr.sun_path[i + 1] = *byte as libc::c_char;
+            }
+            let len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
+            if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) != 0 {
+                let err = io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+            if libc::listen(fd, 8) != 0 {
+                let err = io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+            Ok(UnixListener::from_raw_fd(fd))
+        }
+    }
+
+    /// Bind the abstract status socket. Call once, after the instance lock is held.
+    pub fn init_socket(name: &str) -> io::Result<()> {
+        let listener = bind_abstract(name)?;
+        listener.set_nonblocking(true)?;
+        let _ = STATUS_SOCKET.set(Some(listener));
+        Ok(())
+    }
+
+    /// Publish one snapshot to every status client connected right now.
+    pub fn publish(snapshot: &Snapshot<'_>) {
+        let body = render(snapshot);
+        let Some(Some(listener)) = STATUS_SOCKET.get() else {
+            return;
+        };
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    use std::io::Write as _;
+                    let _ = stream.write_all(body.as_bytes());
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
         }
     }
 }
+
+#[cfg(not(unix))]
+mod socket {
+    use super::Snapshot;
+    use std::io;
+
+    /// No abstract LOCAL sockets off unix; the JSON file writer stays in charge.
+    pub fn init_socket(_name: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "status socket is unix-only",
+        ))
+    }
+
+    pub fn publish(_snapshot: &Snapshot<'_>) {}
+}
+
+pub use socket::{init_socket, publish};
 
 /// Atomic 0644 write: temp file + rename, exactly like the C daemon.
 pub fn write(path: &str, snapshot: &Snapshot<'_>) -> io::Result<()> {
