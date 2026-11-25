@@ -1515,27 +1515,39 @@ impl Submitter {
             // 480 frames = 10 ms at 48 kHz, well below the ring capacity.
             let chunk = self.frames.min(480);
             let slice_len = chunk * self.channels;
-            let rc = unsafe {
-                session.submit(
-                    self.first,
-                    self.pending.as_ptr(),
-                    chunk,
-                    self.channels,
-                )
-            };
-            self.first += chunk as u64;
-            if rc == 0 {
-                self.submitted += chunk as u64;
-            } else {
+            let mut rc;
+            let mut retries = 0u32;
+            loop {
+                rc = unsafe {
+                    session.submit(
+                        self.first,
+                        self.pending.as_ptr(),
+                        chunk,
+                        self.channels,
+                    )
+                };
+                if rc == 0 {
+                    break;
+                }
+                // -7 = QUEUE_FULL: vendor ring momentarily full (session prebuffer or
+                // a scheduling burst). Backpressure and retry the SAME frame index;
+                // advancing the clock past unsubmitted audio would make every later
+                // submit fail and degrade the channel into permanent silence.
+                if rc == -7 && retries < 2_000 {
+                    retries += 1;
+                    std::thread::sleep(Duration::from_micros(500));
+                    continue;
+                }
                 return Err(format!("session.submit code={rc}"));
             }
+            self.first += chunk as u64;
+            self.submitted += chunk as u64;
             self.pending.drain(..slice_len);
             self.frames -= chunk;
         }
         Ok(())
     }
 }
-
 fn feed_frame(
     frame: &[i32; MAX_CH],
     channels: usize,
