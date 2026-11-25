@@ -1,7 +1,14 @@
 #!/system/bin/sh
 # Start AES67 broadcast (idempotent): ensure runtime dir + overlay/HAL tee, apply config, mark running.
 set -u
-STAGE=/data/user/0/dev.aes67bridge.tv/files
+# App 解压源 → 运行期统一 stage（root 同步；运行期文件都在 /data/aes67bridge）
+APP=/data/user/0/dev.aes67bridge.tv/files
+STAGE=/data/aes67bridge/stage
+mkdir -p "$STAGE"
+cp -f "$APP"/* "$STAGE"/ 2>/dev/null
+chown root:root "$STAGE"/* 2>/dev/null
+chmod 0755 "$STAGE"/*.sh "$STAGE"/haltee_rtp_sender 2>/dev/null
+chmod 0644 "$STAGE"/*.so "$STAGE"/*.orig 2>/dev/null
 ROOT=/data/aes67bridge
 LOG=$ROOT/logs/daemon.log
 umask 027

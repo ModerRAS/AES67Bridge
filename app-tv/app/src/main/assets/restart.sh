@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # restart.sh — restart the configured AES67 engine (legacy C or new Rust daemon).
 set -u
-STAGE=/data/user/0/dev.aes67bridge.tv/files
+STAGE=/data/aes67bridge/stage
 ROOT=/data/aes67bridge
 CONF=$ROOT/daemon.conf
 LOG=$ROOT/logs/daemon.log

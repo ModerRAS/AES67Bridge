@@ -2,7 +2,7 @@
 # Apply UI config (single source of truth = /data/aes67bridge/daemon.conf), then restart daemon.
 # Mode is DERIVED from hal_buf: 20 -> normal (20ms), 5 -> lowlat (5ms).
 set -u
-APP=/data/data/dev.aes67bridge.tv/files
+APP=/data/aes67bridge/stage
 ROOT=/data/aes67bridge
 CONF=$ROOT/daemon.conf
 LOG=$ROOT/logs/daemon.log
