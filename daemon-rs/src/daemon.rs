@@ -194,6 +194,16 @@ impl Daemon {
             cfg.ptp_domain,
             cfg.sap
         );
+        if cfg.pt != 0 {
+            let expected = if cfg.encoding == Encoding::L24 { 97 } else { 96 };
+            if cfg.pt != expected {
+                logln!(
+                    "WARN pt={} with encoding={} (AES67 default mapping is 97=L24 / 96=L16); receivers that derive the sample width from the PT will misread this stream",
+                    cfg.pt,
+                    encoding.codec()
+                );
+            }
+        }
         let _lock = platform::acquire_instance_lock(&cfg.lock).map_err(|err| {
             (
                 EXIT_LOCKED,

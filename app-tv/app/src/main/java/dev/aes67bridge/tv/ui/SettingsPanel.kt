@@ -370,10 +370,14 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 }
                                 RowLabel("Payload Type") {
                                     OptChip("自动", selected = get("pt").isEmpty() || get("pt") == "0") { set("pt", "") }
-                                    OptChip("97 · L24", selected = get("pt") == "97") { set("pt", "97") }
-                                    OptChip("96 · L16", selected = get("pt") == "96") { set("pt", "96") }
+                                    OptChip("97 · L24", selected = get("pt") == "97") {
+                                        set("pt", "97"); set("codec", "pcm")
+                                    }
+                                    OptChip("96 · L16", selected = get("pt") == "96") {
+                                        set("pt", "96"); set("codec", "l16")
+                                    }
                                 }
-                                Hint("RTP 动态 PT（SDP 会广播）：默认 L24=97 / L16=96；接收端必须用同一个 PT，联调不通时先核对两端")
+                                Hint("RTP 动态 PT（SDP 会广播）：AES67 惯例 97=L24、96=L16；这里选 96/97 会同时切换编码，接收端用「按 PT 推采样宽度」的方式解析时才不会把 24bit 当 16bit 读成白噪音")
                                 RowLabel("采样率") {
                                     OptChip("48kHz · AES67（固定）", selected = true) { }
                                 }
