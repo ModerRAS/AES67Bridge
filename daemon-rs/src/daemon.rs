@@ -218,9 +218,92 @@ impl Daemon {
         // codec=bits: consume the HAL tee raw compressed ES (live.bits) and
         // decode E-AC-3 / AC-3 core PCM. This path never reads live.pcm and is
         // selected explicitly so the PCM transport contract stays untouched.
-        if matches!(cfg.codec.as_str(), "bits" | "auto" | "eac3" | "truehd") {
-            return self.run_bits(&cfg);
+        if cfg.codec == "auto" {
+            return self.run_auto(&cfg);
         }
+        if matches!(cfg.codec.as_str(), "bits" | "eac3" | "truehd") {
+            return self.run_bits(&cfg, false);
+        }
+        self.run_pcm(&cfg, false)
+    }
+
+    /// codec=auto: probe both HAL tee sources and run whichever one is live.
+    /// live.bits (compressed ES -> TrueHD/AC3 decode) wins while it is active;
+    /// otherwise live.pcm (already-decoded PCM) is rendered to the configured
+    /// layout. When both are quiet the session is released and the router waits,
+    /// so the UI shows "waiting for a source" instead of an endless silent stream.
+    fn run_auto(&mut self, cfg: &Config) -> Result<i32, (i32, String)> {
+        logln!(
+            "AUTO router start: probing {} (compressed) and {} (decoded PCM)",
+            cfg.bits_meta,
+            cfg.meta
+        );
+        let mut last_idle_ns = 0i64;
+        loop {
+            if platform::stop_requested() {
+                return Ok(EXIT_OK);
+            }
+            match auto_source(cfg) {
+                AutoSource::Bits => {
+                    logln!("AUTO source=bits (HAL tee compressed ES)");
+                    match self.run_bits(cfg, true) {
+                        Ok(code) => {
+                            if code != EXIT_OK {
+                                return Ok(code);
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err((EXIT_USAGE, message)) => return Err((EXIT_USAGE, message)),
+                        Err((code, message)) => {
+                            logln!("WARN AUTO bits path exited code={code}: {message}");
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                    }
+                }
+                AutoSource::Pcm => {
+                    logln!("AUTO source=pcm (HAL decoded PCM)");
+                    match self.run_pcm(cfg, true) {
+                        Ok(code) => {
+                            if code != EXIT_OK {
+                                return Ok(code);
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err((EXIT_USAGE, message)) => return Err((EXIT_USAGE, message)),
+                        Err((code, message)) => {
+                            logln!("WARN AUTO pcm path exited code={code}: {message}");
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                    }
+                }
+                AutoSource::Idle => {
+                    let now = platform::now_ns();
+                    if now - last_idle_ns > 1_000_000_000 {
+                        last_idle_ns = now;
+                        write_idle_status(cfg, self.ptp_mode);
+                        logln!("AUTO idle: waiting for a live HAL source");
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+
+    /// PCM / live.pcm path. The session is (re)built on live.meta changes and the
+    /// optional ROAR render stage carries gain, downmix and the look-ahead limiter.
+    /// `auto` = the router owns the loop: return when live.bits becomes the live
+    /// source, or after the stream has been silent for `AUTO_IDLE`.
+    fn run_pcm(&mut self, cfg: &Config, auto: bool) -> Result<i32, (i32, String)> {
+        let cfg = cfg.clone();
+        let group_ip = cfg.group_ip();
+        let local_ip = cfg.local_ip.unwrap_or_else(|| {
+            platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        });
+        let encoding = if cfg.encoding == Encoding::L24 {
+            RtpEncoding::L24
+        } else {
+            RtpEncoding::L16
+        };
         let mut source = source::open(&cfg.fifo)
             .map_err(|err| (EXIT_USAGE, format!("open fifo {} failed: {err}", cfg.fifo)))?;
 
@@ -234,6 +317,7 @@ impl Daemon {
         let mut session: Option<Session> = None;
         let mut plan: Vec<FlowPlan> = Vec::new();
         let mut submitter = Submitter::new(2);
+        submitter.set_gain(10f32.powf(cfg.gain_db.clamp(-60.0, 12.0) / 20.0));
         let mut resampler: Box<dyn Resampler> = Box::new(Passthrough);
         // PCM -> ROAR render stage (None = legacy strict intersection path).
         let mut render_stage: Option<PcmRenderStage> = None;
@@ -252,7 +336,7 @@ impl Daemon {
         let mut bytes_read: u64 = 0;
         let mut reads: u64 = 0;
         let mut eofs: u64 = 0;
-        let mut last_data_ns = 0i64;
+        let mut last_data_ns = platform::now_ns();
         let mut fifo_last = 0usize;
         let mut fifo_max = 0usize;
         let mut maxch_warned = false;
@@ -268,6 +352,14 @@ impl Daemon {
         let result: Result<(), (i32, String)> = (|| {
             loop {
                 if platform::stop_requested() {
+                    break;
+                }
+                if auto && bits_stream_active(&cfg) {
+                    logln!("AUTO switch: live.bits became the live source; releasing the PCM session");
+                    break;
+                }
+                if auto && session.is_some() && source_idle(last_data_ns) {
+                    logln!("AUTO idle: no live.pcm bytes for {} ms; releasing the PCM session", AUTO_IDLE_MS);
                     break;
                 }
                 let now = platform::now_ns();
@@ -358,6 +450,7 @@ impl Daemon {
                         encoding,
                         &layout_plan,
                         &plan,
+                        self.ptp_mode,
                     )
                     .map_err(|message| (EXIT_USAGE, message))?;
                     self.ptp_mode = ptp_mode;
@@ -398,6 +491,7 @@ impl Daemon {
                     publish_sdp(&fresh, &cfg, &plan, &self.shared);
                     session = Some(fresh);
                     submitter = Submitter::new(layout_plan.source_channels);
+                    submitter.set_gain(10f32.powf(cfg.gain_db.clamp(-60.0, 12.0) / 20.0));
                     if let Some(stage) = render_stage.as_mut() {
                         stage.reset();
                     }
@@ -503,7 +597,7 @@ impl Daemon {
                         active,
                         &cfg,
                         &plan,
-                        &seat(&meter, &resampler, &submitter),
+                        &seat(&meter, &resampler, &submitter, age_ms(last_data_ns), current.rate),
                         fifo_last,
                         &current,
                         self.ptp_mode,
@@ -574,7 +668,7 @@ impl Daemon {
                 active,
                 &cfg,
                 &plan,
-                &seat(&meter, &resampler, &submitter),
+                &seat(&meter, &resampler, &submitter, age_ms(last_data_ns), current.rate),
                 fifo_last,
                 &current,
                 self.ptp_mode,
@@ -607,9 +701,10 @@ impl Daemon {
         }
         result.map(|_| EXIT_OK)
     }
+
     /// codec=bits: decode the HAL tee compressed ES (live.bits) to PCM and feed
     /// the same AES67 session. Core AC-3/E-AC-3 only; no DSP, no down/upmix.
-    fn run_bits(&mut self, cfg: &Config) -> Result<i32, (i32, String)> {
+    fn run_bits(&mut self, cfg: &Config, auto: bool) -> Result<i32, (i32, String)> {
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicU64;
 
@@ -636,6 +731,11 @@ impl Daemon {
         let mut warned_rate = false;
         while platform::now_ns() < deadline {
             if platform::stop_requested() {
+                return Ok(EXIT_OK);
+            }
+            if auto && !bits_stream_active(cfg) {
+                // Nothing is arriving on live.bits: hand control back to the router
+                // (it either starts the PCM path or idles) instead of blocking here.
                 return Ok(EXIT_OK);
             }
             let now = platform::now_ns();
@@ -711,7 +811,7 @@ impl Daemon {
                     bytes: prefetched.len() as u64,
                     dropped: 0,
                 });
-                return self.run_truehd(cfg, &bits_meta, bits_source, prefetched);
+                return self.run_truehd(cfg, auto, &bits_meta, bits_source, prefetched);
             }
             // codec=truehd must never fall through to the AC3/EAC3 path on a
             // transient 48 kHz phantom meta; only a real TrueHD byte stream (or
@@ -770,6 +870,7 @@ impl Daemon {
             encoding,
             &layout_plan,
             &plan,
+            self.ptp_mode,
         )
         .map_err(|message| (EXIT_USAGE, message))?;
         self.ptp_mode = ptp_mode;
@@ -888,6 +989,10 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
+                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns)) {
+                    logln!("AUTO switch: live.bits went quiet; releasing the bits session");
+                    break;
+                }
                 let now = platform::now_ns();
                 if cfg.seconds > 0.0 && (now - start_ns) as f64 / 1e9 >= cfg.seconds {
                     break;
@@ -933,10 +1038,11 @@ impl Daemon {
                         decoder_errors += 1;
                         continue;
                     }
+                    let decode_gain = 10f32.powf(cfg.gain_db.clamp(-60.0, 12.0) / 20.0);
                     for samples in frame.samples.chunks_exact(frame.channels) {
                         let mut pcm = [0_i32; MAX_CH];
                         for (channel, &sample) in samples.iter().enumerate() {
-                            pcm[channel] = (sample * 8_388_608.0)
+                            pcm[channel] = (sample * decode_gain * 8_388_608.0)
                                 .round()
                                 .clamp(-8_388_608.0, 8_388_607.0)
                                 as i32;
@@ -974,10 +1080,14 @@ impl Daemon {
                 if now - last_status_ns > 1_000_000_000 {
                     last_status_ns = now;
                     let parts = StatusParts {
-                        rs_in: decoder.frames,
-                        rs_out: submitted,
+                        rs_in: crate::OUT_RATE as u64,
+                        rs_out: crate::OUT_RATE as u64,
                         submitted,
                         levels: meter.dbfs(),
+                        src_active: now - last_data_ns < 1_000_000_000,
+                        src_age_ms: age_ms(last_data_ns),
+                        src_codec: "eac3",
+                        src_rate: 48_000,
                         _marker: std::marker::PhantomData,
                     };
                     write_status(&session, cfg, &plan, &parts, queue.len() / source_channels, &shape, self.ptp_mode, None);
@@ -1012,10 +1122,14 @@ impl Daemon {
         })();
         submit_into(&session, &mut queue, &mut first, &mut submitted, &mut submit_warned);
         let parts = StatusParts {
-            rs_in: decoder.frames,
-            rs_out: submitted,
+            rs_in: crate::OUT_RATE as u64,
+            rs_out: crate::OUT_RATE as u64,
             submitted,
             levels: meter.dbfs(),
+            src_active: age_ms(last_data_ns) < 1_000,
+            src_age_ms: age_ms(last_data_ns),
+            src_codec: "eac3",
+            src_rate: 48_000,
             _marker: std::marker::PhantomData,
         };
         write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None);
@@ -1046,6 +1160,7 @@ impl Daemon {
     fn run_truehd(
         &mut self,
         cfg: &Config,
+        auto: bool,
         bits_meta: &meta::BitsMeta,
         mut bits_source: source::Source,
         mut prefetched: Vec<u8>,
@@ -1063,9 +1178,10 @@ impl Daemon {
                 "target layout 4.1.2 is not supported by the ROAR validated patch; use 5.1.2/7.1.2/7.1.4/9.1.6 and let the downstream processor downmix".to_string(),
             ));
         }
-        let mut pipeline = dolby_pipeline::ObjectPipeline::new(&target)
+        let mut pipeline = dolby_pipeline::ObjectPipeline::new_with(&target, cfg.limiter_db)
             .map_err(|err| (EXIT_USAGE, format!("truehd pipeline init target={target} failed: {err}")))?;
         pipeline.set_dialnorm_enabled(cfg.dialnorm);
+        pipeline.set_user_gain_db(cfg.gain_db);
         let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
             .ok_or((EXIT_USAGE, format!("unsupported ptime {} us", cfg.ptime_us)))?;
         let encoding = if cfg.encoding == Encoding::L24 {
@@ -1122,6 +1238,10 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
+                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns)) {
+                    logln!("AUTO switch: live.bits went quiet; releasing the bits session");
+                    break;
+                }
                 let now = platform::now_ns();
                 if cfg.seconds > 0.0 && (now - start_ns) as f64 / 1e9 >= cfg.seconds {
                     break;
@@ -1159,15 +1279,15 @@ impl Daemon {
                                 "WARN truehd pipeline error #{}: {err}; resetting pipeline",
                                 pipeline_errors
                             );
-                            pipeline = dolby_pipeline::ObjectPipeline::new(&target).map_err(
-                                |reset_err| {
+                            pipeline = dolby_pipeline::ObjectPipeline::new_with(&target, cfg.limiter_db)
+                                .map_err(|reset_err| {
                                     (
                                         EXIT_USAGE,
                                         format!("truehd pipeline reset failed: {reset_err}"),
                                     )
-                                },
-                            )?;
+                                })?;
                             pipeline.set_dialnorm_enabled(cfg.dialnorm);
+                            pipeline.set_user_gain_db(cfg.gain_db);
                             preroll.clear();
                             pending.clear();
                             started = false;
@@ -1241,6 +1361,7 @@ impl Daemon {
                                 encoding,
                                 &layout_plan,
                                 &new_plan,
+                                self.ptp_mode,
                             )
                             .map_err(|message| (EXIT_USAGE, message))?;
                             self.ptp_mode = ptp_mode;
@@ -1344,10 +1465,14 @@ impl Daemon {
                     last_status_ns = now;
                     if let (Some(active), Some(current)) = (session.as_ref(), shape.as_ref()) {
                         let parts = StatusParts {
-                            rs_in: blocks_out,
-                            rs_out: submitted,
+                            rs_in: 48_000,
+                            rs_out: 48_000,
                             submitted,
                             levels: meter.dbfs(),
+                            src_active: now - last_data_ns < 1_000_000_000,
+                            src_age_ms: age_ms(last_data_ns),
+                            src_codec: "truehd",
+                            src_rate: 48_000,
                             _marker: std::marker::PhantomData,
                         };
                         let stats = pipeline.decode_stats();
@@ -1422,10 +1547,14 @@ impl Daemon {
         })();
         if let (Some(active), Some(current)) = (session.as_ref(), shape.as_ref()) {
             let parts = StatusParts {
-                rs_in: blocks_out,
-                rs_out: submitted,
+                rs_in: 48_000,
+                rs_out: 48_000,
                 submitted,
                 levels: meter.dbfs(),
+                src_active: age_ms(last_data_ns) < 1_000,
+                src_age_ms: age_ms(last_data_ns),
+                src_codec: "truehd",
+                src_rate: 48_000,
                 _marker: std::marker::PhantomData,
             };
             let stats = pipeline.decode_stats();
@@ -1516,19 +1645,35 @@ struct StatusParts<'a> {
     rs_out: u64,
     submitted: u64,
     levels: [f64; MAX_CH],
+    src_active: bool,
+    src_age_ms: u64,
+    src_codec: &'static str,
+    src_rate: u32,
     _marker: std::marker::PhantomData<&'a ()>,
+}
+
+/// Milliseconds since the last source byte, saturating at 0 for clock resets.
+fn age_ms(last_data_ns: i64) -> u64 {
+    let now = platform::now_ns();
+    (now - last_data_ns).max(0) as u64 / 1_000_000
 }
 
 fn seat<'a>(
     meter: &LevelMeter,
     resampler: &Box<dyn Resampler>,
     submitter: &Submitter,
+    src_age_ms: u64,
+    src_rate: u32,
 ) -> StatusParts<'a> {
     StatusParts {
         rs_in: resampler.rs_in(),
         rs_out: resampler.rs_out(),
         submitted: submitter.submitted,
         levels: meter.dbfs(),
+        src_active: src_age_ms < 1_000,
+        src_age_ms,
+        src_codec: "pcm",
+        src_rate,
         _marker: std::marker::PhantomData,
     }
 }
@@ -1539,6 +1684,9 @@ struct Submitter {
     first: u64,
     channels: usize,
     submitted: u64,
+    /// Linear output trim for the strict (non-rendered) PCM path; the ROAR render
+    /// stage applies the same trim before its limiter instead.
+    gain: f32,
 }
 
 impl Submitter {
@@ -1549,12 +1697,18 @@ impl Submitter {
             first: 0,
             channels,
             submitted: 0,
+            gain: 1.0,
         }
     }
 
+    fn set_gain(&mut self, gain: f32) {
+        self.gain = if gain.is_finite() { gain.max(0.0) } else { 1.0 };
+    }
+
     fn push(&mut self, frame: &[i32; MAX_CH], channels: usize) {
+        let gain = self.gain;
         for c in 0..channels.min(frame.len()) {
-            self.pending.push(frame[c] as f32 / 8_388_608.0);
+            self.pending.push(frame[c] as f32 / 8_388_608.0 * gain);
         }
         self.frames += 1;
     }
@@ -1626,9 +1780,17 @@ struct PcmRenderStage {
 }
 
 impl PcmRenderStage {
-    fn new(source_layout: &str, target_layout: &str) -> Result<Self, String> {
-        let config = dolby_pipeline::PcmConfig::new(source_layout, target_layout, 480);
-        let renderer = dolby_pipeline::PcmRenderer::new(&config).map_err(|err| err.to_string())?;
+    fn new(
+        source_layout: &str,
+        target_layout: &str,
+        limiter_db: f32,
+        gain_db: f32,
+    ) -> Result<Self, String> {
+        let mut config = dolby_pipeline::PcmConfig::new(source_layout, target_layout, 480);
+        config.limiter_threshold_db = limiter_db.clamp(-24.0, 0.0);
+        let mut renderer =
+            dolby_pipeline::PcmRenderer::new(&config).map_err(|err| err.to_string())?;
+        renderer.set_input_gain(10f32.powf(gain_db.clamp(-60.0, 12.0) / 20.0));
         let channels_in = renderer.source_layout().len();
         let channels_out = renderer.target_layout().len();
         Ok(Self {
@@ -1788,7 +1950,7 @@ fn classify_pcm_layout(
             return Ok(rendered_layout_plan(target, source_layout_id, channels));
         }
         *render_stage = None;
-        match PcmRenderStage::new(source_layout_id, target) {
+        match PcmRenderStage::new(source_layout_id, target, cfg.limiter_db, cfg.gain_db) {
             Ok(stage) => {
                 let channels = stage.channels_out;
                 *render_stage = Some(stage);
@@ -1939,6 +2101,7 @@ fn start_session_with_ptp_fallback(
     encoding: RtpEncoding,
     layout: &LayoutPlan,
     plan: &[FlowPlan],
+    hint: &str,
 ) -> Result<(Session, &'static str), String> {
     let attempt = |master: Option<Ipv4Addr>| -> Result<Session, String> {
         let mut candidate = cfg.clone();
@@ -1967,23 +2130,36 @@ fn start_session_with_ptp_fallback(
     if !cfg.ptp {
         return attempt(None).map(|session| (session, "local"));
     }
-    match cfg.ptp_master {
-        None => attempt(None).map(|session| (session, "multicast")),
-        Some(master) => match attempt(Some(master)) {
-            Ok(session) => Ok((session, "unicast")),
-            Err(err) => {
-                logln!(
-                    "WARN PTP unicast master {} did not lock ({}); falling back to multicast GM",
-                    master,
-                    err
-                );
-                attempt(None)
-                    .map(|session| (session, "multicast"))
-                    .map_err(|fallback| {
-                        format!("{err}; multicast fallback also failed: {fallback}")
-                    })
-            }
-        },
+    let Some(master) = cfg.ptp_master else {
+        return attempt(None).map(|session| (session, "multicast"));
+    };
+    // The unicast grandmaster can be unreachable (no reply) and each attempt costs
+    // the full lock timeout. Once multicast was the winning mode in this process,
+    // start there directly: source switches then no longer pay that timeout.
+    if hint == "multicast" {
+        match attempt(None) {
+            Ok(session) => return Ok((session, "multicast")),
+            Err(err) => logln!(
+                "WARN PTP multicast GM did not lock ({}); retrying unicast master {}",
+                err,
+                master
+            ),
+        }
+    }
+    match attempt(Some(master)) {
+        Ok(session) => Ok((session, "unicast")),
+        Err(err) => {
+            logln!(
+                "WARN PTP unicast master {} did not lock ({}); falling back to multicast GM",
+                master,
+                err
+            );
+            attempt(None)
+                .map(|session| (session, "multicast"))
+                .map_err(|fallback| {
+                    format!("{err}; multicast fallback also failed: {fallback}")
+                })
+        }
     }
 }
 
@@ -2170,6 +2346,64 @@ fn write_atomic(path: &str, body: &[u8]) -> io::Result<()> {
 /// Write a heartbeat status while the daemon is waiting for a stream (no session
 /// yet) or between TrueHD blocks. The TV app treats a missing/stale status file as
 /// "daemon not running", so the file must refresh at >=1 Hz even when idle.
+/// Codec-router state (codec=auto): which HAL tee source is live right now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoSource {
+    Bits,
+    Pcm,
+    Idle,
+}
+
+/// How long a session is kept after its live source goes quiet. AES67 streams are
+/// continuous, so a pause keeps sending silence; only a longer gap releases the
+/// session (resuming then costs one session rebuild, not another PTP retry).
+const AUTO_IDLE_MS: u64 = 20_000;
+
+fn file_fresh_ms(path: &str, max_ms: u64) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age.as_millis() as u64 <= max_ms)
+}
+
+/// live.bits.meta is being refreshed and describes a decodable 48 kHz bitstream.
+fn bits_stream_active(cfg: &Config) -> bool {
+    if !file_fresh_ms(&cfg.bits_meta, 2_000) {
+        return false;
+    }
+    match meta::parse_bits_meta(&cfg.bits_meta) {
+        Some(bits) => {
+            !bits.is_stale() && (bits.is_truehd() || (bits.is_dolby_es() && bits.rate == 48_000))
+        }
+        None => false,
+    }
+}
+
+/// live.meta is being refreshed and describes a 44.1/48 kHz PCM stream.
+fn pcm_stream_active(cfg: &Config) -> bool {
+    if !file_fresh_ms(&cfg.meta, 2_000) {
+        return false;
+    }
+    let mut state = MetaState::default();
+    meta::parse_meta(&cfg.meta, &mut state);
+    state.valid && (state.rate == 44_100 || state.rate == 48_000)
+}
+
+fn source_idle(last_data_ns: i64) -> bool {
+    age_ms(last_data_ns) >= AUTO_IDLE_MS
+}
+
+fn auto_source(cfg: &Config) -> AutoSource {
+    if bits_stream_active(cfg) {
+        AutoSource::Bits
+    } else if pcm_stream_active(cfg) {
+        AutoSource::Pcm
+    } else {
+        AutoSource::Idle
+    }
+}
+
 fn write_idle_status(cfg: &Config, ptp_mode: &str) {
     let layout = if cfg.layout.trim().is_empty() {
         cfg.effective_layout()
@@ -2250,6 +2484,10 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         flows: &flow_status,
         rs_in: 0,
         rs_out: 0,
+        src_active: false,
+        src_age_ms: 0,
+        src_codec: "none",
+        src_rate: crate::OUT_RATE,
         levels: &levels,
         ptime_us: cfg.ptime_us,
         split: !cfg.no_split,
@@ -2346,6 +2584,10 @@ fn write_status(
         flows: &flow_status,
         rs_in: parts.rs_in,
         rs_out: parts.rs_out,
+        src_active: parts.src_active,
+        src_age_ms: parts.src_age_ms,
+        src_codec: parts.src_codec,
+        src_rate: parts.src_rate,
         levels: &levels,
         ptime_us: cfg.ptime_us,
         split: !cfg.no_split,
@@ -2388,7 +2630,7 @@ mod pcm_render_tests {
 
     #[test]
     fn pcm_render_stage_folds_712_into_512() {
-        let mut stage = PcmRenderStage::new("7.1.2", "5.1.2").expect("stage");
+        let mut stage = PcmRenderStage::new("7.1.2", "5.1.2", -1.0, 0.0).expect("stage");
         assert_eq!(stage.channels_in, 10);
         assert_eq!(stage.channels_out, 8);
         let mut meter = LevelMeter::default();
@@ -2422,7 +2664,7 @@ mod pcm_render_tests {
 
     #[test]
     fn pcm_render_stage_same_layout_passes_channels_through() {
-        let mut stage = PcmRenderStage::new("5.1", "5.1").expect("stage");
+        let mut stage = PcmRenderStage::new("5.1", "5.1", -1.0, 0.0).expect("stage");
         let mut meter = LevelMeter::default();
         let mut submitter = Submitter::new(6);
         let levels = [0.1f32, 0.2, 0.3, 0.05, 0.15, 0.25];
@@ -2452,7 +2694,7 @@ mod pcm_render_tests {
 
     #[test]
     fn pcm_render_stage_unknown_source_layout_is_rejected() {
-        assert!(PcmRenderStage::new("4.1.2", "5.1.2").is_err());
+        assert!(PcmRenderStage::new("4.1.2", "5.1.2", -1.0, 0.0).is_err());
         // 4.1.2 must also be rejected by the classifier and fall back to the legacy plan.
         let cfg = Config::default();
         let mut stage = None;

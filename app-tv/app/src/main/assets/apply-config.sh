@@ -10,6 +10,10 @@ umask 027
 mkdir -p "$ROOT/logs"
 chown root:root "$ROOT/logs"
 chmod 0700 "$ROOT/logs"
+# App 私有目录是 GUI 写入的唯一配置源：应用设置时必须先从那里同步到 stage，
+# 否则 stage 里还是上一次 start.sh 同步的旧配置（sap 等键会因此丢失）。
+APPDIR=/data/user/0/dev.aes67bridge.tv/files
+if [ -f "$APPDIR/daemon.conf" ]; then cp -f "$APPDIR/daemon.conf" "$APP/daemon.conf" 2>/dev/null; fi
 if [ -f "$APP/daemon.conf" ]; then cp -f "$APP/daemon.conf" "$CONF"; fi
 chown root:root "$CONF" 2>/dev/null
 chmod 0644 "$CONF" 2>/dev/null

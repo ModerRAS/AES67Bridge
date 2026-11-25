@@ -25,7 +25,15 @@ data class Status(
     val srcChmask: String = "",
     val srcRate: String = "",
     val ageMs: Long = -1,
-    val levels: List<Float> = emptyList()
+    val levels: List<Float> = emptyList(),
+    /** daemon 真实源状态：最近 1 s 内收到过源字节。 */
+    val srcActive: Boolean = false,
+    val srcAgeMs: Long = 0,
+    val srcCodec: String = "",
+    val pt: String = "",
+    val outPeak: Float = 0f,
+    val limited: Long = 0,
+    val dialnormDb: Float = 0f
 )
 
 /** 运行时目录已统一到 /data/aes67bridge；旧 /data/haltee 仅作迁移期只读回退。 */
@@ -89,6 +97,11 @@ fun readStatus(): Status {
         m?.groupValues?.get(1)?.split(",")?.mapNotNull { it.trim().toFloatOrNull() } ?: emptyList()
     } catch (t: Throwable) { emptyList() }
     val streamId = grab(Regex("\"stream\"\\s*:\\s*\\{\"id\"\\s*:\\s*(-?\\d+)"), js).toLongOrNull() ?: 0L
+    val srcBlob = grab(Regex("\"src\"\\s*:\\s*\\{([^}]*)\\}"), js)
+    val srcActive = grab(Regex("\"active\"\\s*:\\s*([01])"), srcBlob) == "1"
+    val srcAgeMs = grab(Regex("\"age_ms\"\\s*:\\s*(\\d+)"), srcBlob).toLongOrNull() ?: 0L
+    val srcCodec = grab(Regex("\"codec\"\\s*:\\s*\"([a-z0-9_]+)\""), srcBlob)
+    val srcRate = grab(Regex("\"rate\"\\s*:\\s*(\\d+)"), srcBlob)
     val meta = if (streamId > 0) readMetaMap() else emptyMap()
     val metaId = meta["stream_id"]?.toLongOrNull() ?: -1L
     // HAL 可能在 daemon 绑流后再次开流（meta stream_id 更大）；meta 不比当前会话旧即视为同一真实码流。
@@ -113,9 +126,16 @@ fun readStatus(): Status {
         srcFmtName = meta["fmt_name"] ?: "",
         srcGuess = meta["codec_guess"] ?: "",
         srcChmask = meta["chmask"] ?: "",
-        srcRate = meta["rate"] ?: "",
+        srcRate = if (srcRate.isNotEmpty()) srcRate else (meta["rate"] ?: ""),
         ageMs = age,
-        levels = levels
+        levels = levels,
+        srcActive = srcActive,
+        srcAgeMs = srcAgeMs,
+        srcCodec = srcCodec,
+        pt = grab(Regex("\"pt\"\\s*:\\s*(\\d+)"), js),
+        outPeak = grab(Regex("\"out_peak\"\\s*:\\s*(-?[0-9.]+)"), js).toFloatOrNull() ?: 0f,
+        limited = grab(Regex("\"limited\"\\s*:\\s*(\\d+)"), js).toLongOrNull() ?: 0L,
+        dialnormDb = grab(Regex("\"dialnorm_db\"\\s*:\\s*(-?[0-9.]+)"), js).toFloatOrNull() ?: 0f
     )
 }
 /** 守护脚本写的生命周期状态：running / stopped / rolledback；没有文件时返回空。 */

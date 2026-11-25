@@ -64,15 +64,19 @@ private val LayoutLabels = mapOf(
     "9.1.6" to "L R C LFE Ls Rs Lb Rb Lw Rw Tfl Tfr Tbl Tbr Tsl Tsr"
 )
 
-private val ConfDefault = mapOf(
+internal val ConfDefault = mapOf(
     "proto" to "aes67", "group" to "239.69.67.1", "port" to "5004",
     "ptime_us" to "1000", "codec" to "pcm", "layout" to "7.1",
-    "split" to "1", "sap" to "1", "gain_db" to "0",
+    "split" to "1", "sap" to "1", "gain_db" to "0", "limiter_db" to "-1",
     "hal_buf" to "20", "fifo_kb" to "32", "ptp" to "0",
-    "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0",
+    "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0", "pt" to "",
     "pcm_export" to "1", "bits_export" to "1", "boot" to "1",
     "engine" to "legacy", "decode" to "auto"
 )
+
+/** 完整配置：默认值打底 + 当前已加载/修改的值（保证 daemon.conf 每次写全，不再丢 sap 这类键）。 */
+internal fun completeConf(vals: Map<String, String>): Map<String, String> =
+    ConfDefault + vals
 
 private fun validMcast(addr: String): Boolean {
     val p = addr.split(".")
@@ -270,6 +274,9 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     fun set(k: String, v: String) {
         vals[k] = v
     }
+    // 应用时永远提交完整配置（默认值兜底），避免 daemon.conf 缺键导致守护回落默认值。
+    fun applyMap(extra: Map<String, String> = emptyMap()): Map<String, String> =
+        completeConf(vals) + extra
 
     // 0 主设置；1 组播编辑；2 PTP GM 编辑；3..6 数字键盘（组播地址/端口/GM 地址/domain）
     // 读一次当前 HAL 实际流（abstract status socket，旧引擎回退 JSON 文件），用来说明"布局 ≠ 源声道"这类矛盾。
@@ -361,6 +368,12 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     OptChip("L24", selected = get("codec") == "pcm") { set("codec", "pcm") }
                                     OptChip("L16", selected = get("codec") == "l16") { set("codec", "l16") }
                                 }
+                                RowLabel("Payload Type") {
+                                    OptChip("自动", selected = get("pt").isEmpty() || get("pt") == "0") { set("pt", "") }
+                                    OptChip("97 · L24", selected = get("pt") == "97") { set("pt", "97") }
+                                    OptChip("96 · L16", selected = get("pt") == "96") { set("pt", "96") }
+                                }
+                                Hint("RTP 动态 PT（SDP 会广播）：默认 L24=97 / L16=96；接收端必须用同一个 PT，联调不通时先核对两端")
                                 RowLabel("采样率") {
                                     OptChip("48kHz · AES67（固定）", selected = true) { }
                                 }
@@ -426,13 +439,23 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 }
                                 Hint("自动：按 live.bits.meta 格式判断（TrueHD 走对象渲染，AC3/EAC3 走解码，PCM 直通）；强制模式用于排查")
                                 RowLabel("输入增益") {
-                                    listOf(-12, -6, 0, 6, 12).forEach { g ->
+                                    listOf(-24, -12, -6, 0, 6).forEach { g ->
                                         OptChip(
                                             if (g > 0) "+" + g else g.toString(),
                                             selected = get("gain_db") == g.toString()
                                         ) { set("gain_db", g.toString()) }
                                     }
                                 }
+                                Hint("在渲染/限幅之前统一加减：负值留余量，正值由 limiter 兜底（+ 过多会听到限幅泵动）")
+                                RowLabel("限幅上限") {
+                                    listOf(-1, -3, -6, -12).forEach { db ->
+                                        OptChip(
+                                            db.toString() + " dBFS",
+                                            selected = get("limiter_db") == db.toString()
+                                        ) { set("limiter_db", db.toString()) }
+                                    }
+                                }
+                                Hint("ROAR 峰值限幅上限：越小余量越大、下游表越不容易顶满；默认 -1 dBFS（AES67 母带惯例）")
                             }
                             if (cat == 2) {
                                 RowLabel("HAL 缓冲") {
@@ -482,7 +505,7 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 }
                                 Hint("开：开机由 BootReceiver 自动拉起守护并开始广播")
                                 RowLabel("守护") {
-                                    OptChip("重启守护") { onApply(vals.toMap() + ("restart" to "1")) }
+                                    OptChip("重启守护") { onApply(applyMap(mapOf("restart" to "1"))) }
                                 }
                                 RowLabel("危险") {
                                     OptChip("回滚原厂 HAL") { onApply(mapOf("rollback" to "1")) }
@@ -496,8 +519,8 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OptChip("应用设置", accent = true) { onApply(vals.toMap()) }
-                        OptChip("应用并重启守护") { onApply(vals.toMap() + ("restart" to "1")) }
+                        OptChip("应用设置", accent = true) { onApply(applyMap()) }
+                        OptChip("应用并重启守护") { onApply(applyMap(mapOf("restart" to "1"))) }
                     }
                 }
 

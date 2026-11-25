@@ -141,6 +141,7 @@ impl LayoutSpec {
     /// Same layout in ROAR output order (the order \`render::ObjectRenderer\` returns).
     pub fn roar(id: &str) -> Option<Self> {
         let channels: &[ChannelId] = match id {
+            "2.0" => &[ChannelId::FL, ChannelId::FR],
             "5.1" => &[ChannelId::FL, ChannelId::FR, ChannelId::FC, ChannelId::LFE, ChannelId::LS, ChannelId::RS],
             "5.1.2" => &[ChannelId::FL, ChannelId::FR, ChannelId::FC, ChannelId::LFE, ChannelId::LS, ChannelId::RS, ChannelId::TFL, ChannelId::TFR],
             "5.1.4" => &[ChannelId::FL, ChannelId::FR, ChannelId::FC, ChannelId::LFE, ChannelId::LS, ChannelId::RS, ChannelId::TFL, ChannelId::TFR, ChannelId::TBL, ChannelId::TBR],
@@ -345,6 +346,7 @@ mod tests {
             let reparsed = LayoutSpec::from_labels(id, &layout.channels().iter().map(|c| c.canonical()).collect::<Vec<_>>()).unwrap();
             assert_eq!(layout, reparsed, "layout {id}");
         }
+        assert_eq!(LayoutSpec::roar("2.0").unwrap().len(), 2);
         assert_eq!(LayoutSpec::known("5.1").unwrap().len(), 6);
         assert_eq!(LayoutSpec::known("7.1.4").unwrap().len(), 12);
         assert_eq!(LayoutSpec::known("9.1.6").unwrap().len(), 16);

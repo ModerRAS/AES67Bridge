@@ -263,14 +263,25 @@ pub struct ObjectPipeline {
     /// Gain currently applied to bed/objects before rendering (dB, 0 = transparent).
     dialnorm_gain_db: f32,
     dialnorm_enabled: bool,
+    /// User output trim in dB (daemon --gain-db / gain_db), applied before the limiter.
+    user_gain_db: f32,
+    /// Combined gain currently configured on the renderer (dialnorm + user trim).
+    applied_gain_db: f32,
 }
 
 impl ObjectPipeline {
     pub fn new(target: &str) -> Result<Self> {
+        Self::new_with(target, -1.0)
+    }
+
+    /// Like new(), but with a configurable limiter ceiling in dBFS (daemon --limiter-db).
+    pub fn new_with(target: &str, limiter_db: f32) -> Result<Self> {
         let target_layout = LayoutSpec::known(target).ok_or_else(|| {
             PipelineError::Unsupported(format!("unknown target layout {target:?}"))
         })?;
-        let render_config = crate::render::RenderConfig::new(target, crate::decode::BLOCK_FRAMES);
+        let mut render_config =
+            crate::render::RenderConfig::new(target, crate::decode::BLOCK_FRAMES);
+        render_config.limiter_threshold_db = limiter_db;
         let renderer = ObjectRenderer::new(&render_config)?;
         let blocks = BlockPipeline::new(
             &target_layout,
@@ -287,6 +298,8 @@ impl ObjectPipeline {
             dialnorm: crate::decode::DialnormInfo::default(),
             dialnorm_gain_db: 0.0,
             dialnorm_enabled: true,
+            user_gain_db: 0.0,
+            applied_gain_db: 0.0,
         })
     }
 
@@ -318,7 +331,35 @@ impl ObjectPipeline {
         self.dialnorm_enabled = enabled;
         if !enabled {
             self.dialnorm_gain_db = 0.0;
-            self.renderer.set_input_gain(1.0);
+        }
+        self.refresh_input_gain();
+    }
+
+    /// User output trim in dB applied together with dialnorm, before the limiter.
+    pub fn set_user_gain_db(&mut self, db: f32) {
+        self.user_gain_db = db.clamp(-60.0, 12.0);
+        self.refresh_input_gain();
+    }
+
+    pub fn user_gain_db(&self) -> f32 {
+        self.user_gain_db
+    }
+
+    /// Combined gain currently configured on the renderer (dialnorm + user trim, dB).
+    pub fn applied_gain_db(&self) -> f32 {
+        self.applied_gain_db
+    }
+
+    fn refresh_input_gain(&mut self) {
+        let dialnorm = if self.dialnorm_enabled {
+            self.dialnorm_gain_db
+        } else {
+            0.0
+        };
+        let total = dialnorm + self.user_gain_db;
+        if (total - self.applied_gain_db).abs() > 1.0e-6 {
+            self.applied_gain_db = total;
+            self.renderer.set_input_gain(10f32.powf(total / 20.0));
         }
     }
 
@@ -339,12 +380,9 @@ impl ObjectPipeline {
             } else {
                 decoded.p2_channels
             };
-            let gain_db = self.dialnorm.gain_db(channels);
-            if (gain_db - self.dialnorm_gain_db).abs() > 1.0e-6 {
-                self.dialnorm_gain_db = gain_db;
-                self.renderer.set_input_gain(10f32.powf(gain_db / 20.0));
-            }
+            self.dialnorm_gain_db = self.dialnorm.gain_db(channels);
         }
+        self.refresh_input_gain();
         let source = self.source_layout(decoded);
         let rendered = self.renderer.render_block(decoded)?;
         let sample_pos = decoded.sample_pos;

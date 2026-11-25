@@ -105,6 +105,8 @@ pub struct PcmRenderer {
     limited_samples: u64,
     out_peak: f32,
     rendered_blocks: u64,
+    /// Pre-render gain applied to the input block (dialnorm/user trim), 1.0 = transparent.
+    input_gain: f32,
 }
 
 impl PcmRenderer {
@@ -198,7 +200,17 @@ impl PcmRenderer {
             limited_samples: 0,
             out_peak: 0.0,
             rendered_blocks: 0,
+            input_gain: 1.0,
         })
+    }
+
+    /// Constant pre-render gain (applied before the limiter, linear).
+    pub fn set_input_gain(&mut self, gain: f32) {
+        self.input_gain = if gain.is_finite() { gain.max(0.0) } else { 1.0 };
+    }
+
+    pub fn input_gain(&self) -> f32 {
+        self.input_gain
     }
 
     pub fn source_layout(&self) -> &LayoutSpec {
@@ -257,6 +269,14 @@ impl PcmRenderer {
         }
         for (dst, &src) in self.in_scratch.iter_mut().zip(self.in_to_roar.iter()) {
             dst.copy_from_slice(&input[src][..frames]);
+        }
+        if (self.input_gain - 1.0).abs() > 1.0e-9 {
+            let gain = self.input_gain;
+            for channel in self.in_scratch.iter_mut() {
+                for sample in channel[..frames].iter_mut() {
+                    *sample *= gain;
+                }
+            }
         }
         for channel in self.out_scratch.iter_mut() {
             channel.fill(0.0);

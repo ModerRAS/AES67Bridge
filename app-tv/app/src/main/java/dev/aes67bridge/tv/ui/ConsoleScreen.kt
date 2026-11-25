@@ -77,9 +77,14 @@ fun ConsoleScreen() {
     }
     fun writeConf(m: Map<String, String>) {
         try {
-            val keys = listOf("group", "port", "ptime_us", "maxch", "codec", "layout", "split", "sap", "gain_db", "hal_buf", "fifo_kb", "ptp", "ptp_gm", "ptp_domain", "asrc", "pcm_export", "bits_export", "boot", "engine", "decode")
+            // 写全配置：daemon.conf 是唯一事实源，缺键（历史上 sap 就这样丢过）会让守护
+            // 回落到默认值。默认值来自 ConfDefault，空值不落盘（pt= 空会让守护解析失败）。
+            val merged = ConfDefault + m
             val sb = StringBuilder()
-            for (k in keys) { val v = m[k]; if (v != null) sb.append(k).append('=').append(v).append('\n') }
+            for ((k, v) in merged) {
+                if (v.isEmpty() || k == "proto") continue
+                sb.append(k).append('=').append(v).append('\n')
+            }
             File(ctx.filesDir, "daemon.conf").writeText(sb.toString())
         } catch (t: Throwable) { }
     }
@@ -97,7 +102,7 @@ fun ConsoleScreen() {
         val srcCh = st.ch.toIntOrNull()
         Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
             InfoCard("信号源（HAL 抓到的原始流）", fmtValue(st), srcSubLine(st), Modifier.weight(1f))
-            InfoCard("AES67 输出", "48k / " + outCh + "ch", "layout " + layout + " · " + (conf["group"] ?: "-") + ":" + (conf["port"] ?: "-"), Modifier.weight(1f))
+            InfoCard("AES67 输出", "48k / " + outCh + "ch", "layout " + layout + " · " + (conf["group"] ?: "-") + ":" + (conf["port"] ?: "-") + " · PT " + nz(st.pt), Modifier.weight(1f))
             InfoCard(
                 "延迟模式",
                 if (st.mode.isEmpty()) "-" else st.mode,
@@ -132,6 +137,28 @@ fun ConsoleScreen() {
         }
         Spacer(Modifier.height(18.dp))
         MeterPanel(st, Modifier.fillMaxWidth().height(320.dp))
+        val limiterInfo = buildString {
+            val peakDb0 = if (st.outPeak > 0f) 20f * kotlin.math.log10(st.outPeak.toDouble()).toFloat() else null
+            if (peakDb0 != null) append("输出峰值 ").append(String.format("%.1f", peakDb0)).append(" dBFS")
+            if (st.limited > 0) {
+                if (isNotEmpty()) append(" · ")
+                append("限幅 ").append(st.limited).append(" 样本")
+            }
+            if (st.dialnormDb != 0f) {
+                if (isNotEmpty()) append(" · ")
+                append("dialnorm ").append(String.format("%.2f", st.dialnormDb)).append(" dB")
+            }
+            val gain = conf["gain_db"] ?: "0"
+            if (gain != "0" && gain.isNotEmpty()) {
+                if (isNotEmpty()) append(" · ")
+                append("增益 ").append(gain).append(" dB")
+            }
+            val limit = conf["limiter_db"] ?: "-1"
+            if (isNotEmpty()) append(" · 上限 ").append(limit).append(" dBFS")
+        }
+        if (limiterInfo.isNotEmpty()) {
+            Text(limiterInfo, color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+        }
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
             // 启动/停止都保持可点：脚本是幂等的，避免按钮被禁用后焦点丢失"点了没反应"
@@ -200,12 +227,21 @@ private fun fmtRate(r: String): String = when (r) {
 
 private fun fmtValue(st: Status): String {
     if (!st.hasData) return "待机"
-    // 未开流（daemon 空闲）时不再显示解码模式冒充片源；只有 live.bits.meta 匹配当前 stream_id 才算真实码流。
-    if (st.streamId <= 0) return "等待片源"
-    if (!st.hasSource) return "码流开启中…"
-    val name = srcCodecName(st)
-    val rate = fmtRate(st.srcRate)
-    return if (rate.isEmpty() || rate == "-") name else name + " " + rate
+    // daemon 的 src.active 是权威判据（最近 1 s 内真的收到源字节）。
+    if (st.srcActive) {
+        val name = sourceName(st)
+        val rate = fmtRate(if (st.srcRate.isNotEmpty()) st.srcRate else st.rate)
+        return if (rate.isEmpty() || rate == "-") name else name + " " + rate
+    }
+    return if (st.streamId > 0) "已就绪 · 等待片源" else "等待片源"
+}
+
+/** daemon 汇报的真实源类型（pcm / eac3 / truehd），没有时回退 live.bits.meta。 */
+private fun sourceName(st: Status): String = when (st.srcCodec) {
+    "truehd" -> "TRUEHD/ATMOS"
+    "eac3" -> "AC3/EAC3"
+    "pcm" -> "PCM"
+    else -> srcCodecName(st)
 }
 
 private fun srcCodecName(st: Status): String {
@@ -228,8 +264,16 @@ private fun srcSubLine(st: Status): String {
         val m = if (st.codec.isEmpty()) "-" else st.codec.uppercase()
         return "未开流 · 解码模式 " + m + "（配置值，非片源检测）"
     }
-    if (!st.hasSource) return "已开流，等待 live.bits.meta 匹配 · SRC " + nz(st.rsIn) + " → " + nz(st.rsOut)
-    return "fmt " + st.srcFmt.take(6) + " · " + nz(st.srcFmtName) + " · chmask " + nz(st.srcChmask)
+    if (!st.srcActive) {
+        return "无信号 " + (st.srcAgeMs / 1000) + "s · 会话" +
+            (if (st.streamId > 0) "保持/等待" else "空闲")
+    }
+    val rate = fmtRate(if (st.srcRate.isNotEmpty()) st.srcRate else st.rate)
+    val parts = mutableListOf<String>()
+    if (rate.isNotEmpty() && rate != "-") parts.add(rate)
+    if (st.srcChmask.isNotEmpty() && st.srcChmask != "0x00000000") parts.add("chmask " + st.srcChmask)
+    if (st.srcGuess.isNotEmpty()) parts.add(st.srcGuess)
+    return sourceName(st) + " · " + (if (parts.isEmpty()) nz(st.srcFmtName) else parts.joinToString(" · "))
 }
 
 private fun readConf(ctx: android.content.Context): Map<String, String> {

@@ -62,6 +62,14 @@ pub struct Snapshot<'a> {
     pub flows: &'a [FlowStatus],
     pub rs_in: u64,
     pub rs_out: u64,
+    /// True when live source data was seen recently (auto/PCM/bits paths all report it).
+    pub src_active: bool,
+    /// Milliseconds since the last source data byte (or the session start).
+    pub src_age_ms: u64,
+    /// Source codec actually being consumed: "pcm" | "eac3" | "truehd".
+    pub src_codec: &'a str,
+    /// Source sample rate in Hz.
+    pub src_rate: u32,
     pub levels: &'a [f64],
     pub ptime_us: u32,
     pub split: bool,
@@ -136,8 +144,13 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     out.push_str("],");
     let _ = write!(
         out,
-        "\"src\":{{\"rs_in\":{},\"rs_out\":{}}},\"levels\":[",
-        snapshot.rs_in, snapshot.rs_out
+        "\"src\":{{\"rs_in\":{},\"rs_out\":{},\"active\":{},\"age_ms\":{},\"codec\":\"{}\",\"rate\":{}}},\"levels\":[",
+        snapshot.rs_in,
+        snapshot.rs_out,
+        u8::from(snapshot.src_active),
+        snapshot.src_age_ms,
+        snapshot.src_codec,
+        snapshot.src_rate
     );
     for (i, level) in snapshot.levels.iter().enumerate() {
         if i != 0 {
@@ -340,6 +353,10 @@ mod tests {
             flows: &[],
             rs_in: 0,
             rs_out: 0,
+            src_active: true,
+            src_age_ms: 12,
+            src_codec: "pcm",
+            src_rate: 48_000,
             levels: &[],
             ptime_us: 1_000,
             split: true,

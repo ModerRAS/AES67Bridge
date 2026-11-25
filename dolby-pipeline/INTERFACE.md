@@ -130,6 +130,11 @@ pub struct Block {
 - **桥内不实现、不启用任何自研 DSP**：EQ、分频、延迟、房间校正、上混/下混、DRC/dialnorm 不做。这些属于"靠近音箱端/后级"的处理。
 - **dialnorm（2026-11-25 决策：做）**：解码器在每个 major sync 读取 FBA `channel_meaning` 的 `twoch/sixch/eightch/sixteench_dialogue_norm`；按 Dolby 参考电平 **−31 dBFS** 换算常数增益 `code − 31 dB`（31 = 参考 = 0 dB，27 = −4 dB；code 0 = 未指定、>31 的 6-bit 2ch 字段不猜测，均按 0 dB），在**渲染前**施加到 bed 与对象 PCM（limiter 仍在最后）。`--dialnorm 0` / `daemon.conf dialnorm=0` 关闭。实测真实 Dolby Atmos 片源 code=31 → 0.00 dB（对参考母版是 no-op）。
 - **例外（2026-11-25 决策）**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启，上限 −1 dBFS、look-ahead 5 ms、attack 1 ms、release 200 ms、硬削波兜底（AOM 实现，实时零分配）。理由：ROAR 渲染输出的峰值实测可达 1.13–1.46（>0 dBFS），直接定标到 L24 会削波；limiter 把峰值限制在 −1 dBFS 以内。关闭方式：`RenderConfig::limiter = false`。启用后输出有 5 ms（240 样本）延迟，末块尾部由 daemon 丢帧即可（连续流不影响）。
+- **两个用户旋钮（2026-11-25 加入，都是给下游留余量/调电平用，不是 DSP）**：
+  - **gain_db**（`--gain-db X` / `daemon.conf gain_db=-12`）：统一输出增益，作用在 **limiter 之前**，和 dialnorm 相加后一起作为渲染器输入增益（`ObjectPipeline::set_user_gain_db`，PCM 渲染走 `PcmRenderer::set_input_gain`，E-AC3 解码走样本乘系数）。负值留余量，正值由 limiter 兜底。范围 −60…+12 dB。
+  - **limiter_db**（`--limiter-db X` / `daemon.conf limiter_db=-3`）：limiter 上限，默认 −1 dBFS（`ObjectPipeline::new_with(target, limiter_db)` / `PcmConfig.limiter_threshold_db`）。下限 −24 dB，最大值 0 dB。
+  - 两者都写进 status（根级 `bits.out_peak`、`bits.limited`、`bits.dialnorm_db` 供 UI 显示），便于在设备上直接看到"输出峰值/限幅样本数/当前 dialnorm"。
+- **PCM 渲染器输入增益 API**：`PcmConfig.limiter_threshold_db` + `PcmRenderer::set_input_gain(linear)`（在 ROAR 渲染前乘到输入块上，limiter 仍在其后）。
 - 唯一的**自研**插入点（预留给将来，**默认空链**）：
 
 `rust
