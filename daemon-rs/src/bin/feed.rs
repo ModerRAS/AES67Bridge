@@ -11,7 +11,7 @@ use std::time::Duration;
 use aes67d::{logln, platform};
 
 const USAGE: &str = "aes67-feed --file RAW --fifo PATH --meta PATH [--rate 48000] [--ch 2] \
-[--fmt s16|s24] [--chunk-ms 5] [--stream-id 9001] [--layout 5.1] [--seconds N] [--hold S]";
+[--fmt s16|s24] [--chunk-ms 5] [--stream-id 9001] [--layout 5.1] [--seconds N] [--hold S] [--loop]";
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -61,6 +61,9 @@ fn main() {
     let hold: f64 = arg_value(&args, "--hold")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
+    // Repeat the source instead of stopping at EOF, so a short fixture can
+    // drive a long soak without a multi-GB raw file.
+    let looping = args.iter().any(|a| a == "--loop");
     // Optional source layout written into live.meta so the daemon can
     // intersect it with the configured target layout instead of guessing.
     let source_layout = arg_value(&args, "--layout").filter(|v| !v.trim().is_empty());
@@ -92,7 +95,7 @@ fn main() {
         0,
     );
     logln!(
-        "FEED start sid={stream_id} rate={rate} ch={channels} fmt={fmt} frames={total_frames} chunk_ms={chunk_ms} fifo={fifo_path}"
+        "FEED start sid={stream_id} rate={rate} ch={channels} fmt={fmt} frames={total_frames} loop={looping} chunk_ms={chunk_ms} fifo={fifo_path}"
     );
     let mut fifo = match open_writer(&fifo_path) {
         Ok(file) => file,
@@ -108,7 +111,13 @@ fn main() {
     let mut chunk_index = 0i64;
     let mut written = 0u64;
     let mut dropped = 0u64;
-    while frame_index < total_frames && !platform::stop_requested() {
+    while !platform::stop_requested() {
+        if frame_index >= total_frames {
+            if !looping {
+                break;
+            }
+            frame_index = 0;
+        }
         let due = start + chunk_index * period_ns;
         platform::sleep_until(due);
         if seconds > 0.0 && (platform::now_ns() - start) as f64 / 1e9 >= seconds {
