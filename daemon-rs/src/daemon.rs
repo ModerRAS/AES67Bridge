@@ -2629,6 +2629,43 @@ mod pcm_render_tests {
     }
 
     #[test]
+    fn pcm_render_stage_512_to_512_keeps_every_channel_in_place() {
+        // 5.1.2 -> 5.1.2 must be identity: L/R/C/LFE/Ls/Rs and both height
+        // channels stay where they are. Each channel gets a distinct level, so a
+        // mistaken 5.1.2->7.1 read (heights into Lb/Rb) or any folding would show
+        // up as a channel-energy mismatch.
+        let mut stage = PcmRenderStage::new("5.1.2", "5.1.2", -1.0, 0.0).expect("stage");
+        assert_eq!(stage.channels_in, 8);
+        assert_eq!(stage.channels_out, 8);
+        let amps = [0.05f32, 0.075, 0.10, 0.125, 0.15, 0.175, 0.20, 0.225];
+        let mut meter = LevelMeter::default();
+        let mut submitter = Submitter::new(8);
+        let mut frame = [0_i32; MAX_CH];
+        for index in 0..480usize {
+            frame = [0_i32; MAX_CH];
+            for (channel, &amp) in amps.iter().enumerate() {
+                let w = 2.0 * std::f32::consts::PI
+                    * (300.0 + 100.0 * channel as f32)
+                    * index as f32
+                    / crate::OUT_RATE as f32;
+                frame[channel] = (amp * w.sin() * 8_388_608.0) as i32;
+            }
+            stage.push(&frame, 8, &mut meter, &mut submitter);
+        }
+        assert_eq!(submitter.frames, 480);
+        let energy = channel_energy(&submitter.pending, 8);
+        // Relative energy per channel must match amp^2: no channel moved, no fold.
+        let base = energy[0] / (amps[0] * amps[0]);
+        for (channel, &amp) in amps.iter().enumerate() {
+            let ratio = energy[channel] / (amp * amp);
+            assert!(
+                (ratio - base).abs() < base * 0.05,
+                "channel {channel} energy ratio {ratio} vs base {base}"
+            );
+        }
+    }
+
+    #[test]
     fn pcm_render_stage_folds_712_into_512() {
         let mut stage = PcmRenderStage::new("7.1.2", "5.1.2", -1.0, 0.0).expect("stage");
         assert_eq!(stage.channels_in, 10);
