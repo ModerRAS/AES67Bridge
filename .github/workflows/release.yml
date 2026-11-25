@@ -95,14 +95,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "AES67Bridge ${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "AES67Bridge ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
 
       - name: Update release/latest.json and push
         run: |
           VERSION="${{ steps.pkg.outputs.VERSION }}"
           TAG="${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # rebase BEFORE writing the file: pull refuses on a dirty tree
+          git pull --rebase origin main
           python3 - "$VERSION" "$TAG" <<'PY'
           import hashlib, json, re, sys
           from datetime import datetime, timezone
@@ -131,9 +139,6 @@ jobs:
               json.dump(payload, f, indent=2)
               f.write("\n")
           PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main || true
           git add release/latest.json
           git commit -m "release: latest.json for ${GITHUB_REF_NAME} [skip ci]" || exit 0
           git push origin HEAD:main
