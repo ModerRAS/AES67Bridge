@@ -82,7 +82,8 @@ fun ConsoleScreen() {
             val merged = ConfDefault + m
             val sb = StringBuilder()
             for ((k, v) in merged) {
-                if (v.isEmpty() || k == "proto") continue
+                // 空值不落盘；proto 是协议占位；restart/rollback 是动作开关，不是配置。
+                if (v.isEmpty() || k == "proto" || k == "restart" || k == "rollback") continue
                 sb.append(k).append('=').append(v).append('\n')
             }
             File(ctx.filesDir, "daemon.conf").writeText(sb.toString())
@@ -95,7 +96,7 @@ fun ConsoleScreen() {
             .background(Brush.verticalGradient(listOf(Bg0, Bg1, Bg0)))
             .padding(start = 52.dp, end = 52.dp, top = 34.dp, bottom = 24.dp)
     ) {
-        Header(st, running, stateText, pending)
+        Header(st, conf, running, stateText, pending)
         Spacer(Modifier.height(22.dp))
         val layout = conf["layout"] ?: st.layout.ifEmpty { "7.1" }
         val outCh = layoutChannels(layout)
@@ -302,7 +303,7 @@ private fun layoutChannels(layout: String): Int = when (layout) {
 }
 
 @Composable
-private fun Header(st: Status, running: Boolean, stateText: String, pending: String) {
+private fun Header(st: Status, conf: Map<String, String>, running: Boolean, stateText: String, pending: String) {
     val (pillText, pillColor) = when {
         pending == "start" -> "◌ 启动中…" to Color(0xFF2C3E50)
         pending == "stop" -> "◌ 停止中…" to Color(0xFF2C3E50)
@@ -316,7 +317,15 @@ private fun Header(st: Status, running: Boolean, stateText: String, pending: Str
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.weight(1f)) {
             Text("AES67Bridge", color = Color(0xFFF2F7FC), fontSize = 40.sp)
-            Text("Z9X 8K · HAL tee → AES67 · L24/PT97 · 48kHz", color = Dim, fontSize = 14.sp)
+            // 顶部副标题必须跟随实际状态：编码/PT 从 status 读（未开流时回退 conf 默认）。
+            val enc = st.enc.ifEmpty {
+                if ((conf["codec"] ?: "pcm") == "l16") "L16" else "L24"
+            }
+            val pt = st.pt.ifEmpty {
+                val confPt = conf["pt"] ?: ""
+                if (confPt.isNotEmpty()) confPt else if (enc == "L16") "96" else "97"
+            }
+            Text("Z9X 8K · HAL tee → AES67 · " + enc + "/PT" + pt + " · 48kHz", color = Dim, fontSize = 14.sp)
         }
         Pill(pillText, pillColor)
         Spacer(Modifier.width(14.dp))

@@ -5,6 +5,7 @@ import java.io.File
 data class Status(
     val hasData: Boolean = false,
     val codec: String = "",
+    val enc: String = "",
     val rate: String = "",
     val ch: String = "",
     val rsIn: String = "",
@@ -109,6 +110,7 @@ fun readStatus(): Status {
     return Status(
         hasData = age in 0..5000,
         codec = grab(Regex("\"codec\"\\s*:\\s*\"([a-zA-Z0-9_]+)\""), js),
+        enc = grab(Regex("\"encoding\"\\s*:\\s*\"([A-Za-z0-9]+)\""), js),
         rate = grab(Regex("\"rate\"\\s*:\\s*(\\d+)"), js),
         ch = grab(Regex("\"ch\"\\s*:\\s*(\\d+)"), js),
         rsIn = grab(Regex("\"rs_in\"\\s*:\\s*(\\d+)"), js),

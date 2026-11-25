@@ -397,7 +397,7 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     }
                                 }
                                 Hint("声道 " + get("maxch") + " ch 由布局决定 · " + (LayoutLabels[get("layout")] ?: ""))
-                                Hint("实测 HAL PCM 上限 8ch：2.0/5.1/7.1 可用；5.1.2 会按 7.1 传（高度语义丢失）；4.1.2 不被 audio policy 接受；5.1.4/7.1.4/9.1.6 只能作为 TrueHD/Atmos 对象渲染目标（需 ROAR），PCM 直通会丢声道或拒播")
+                                Hint("PCM 路径最多 8ch，且 HAL 通道语义只有标准 7.1（没有高度位）：选 5.1.2 时由 ROAR 把 7.1/5.1 渲染到目标布局（Lb/Rb 折进 Ls/Rs），但高度声道只能来自 TrueHD/Atmos 码流路径（对象解码后渲染，不受 HAL PCM 通道限制）。4.1.2 不被 audio policy 接受；9.1.6 仅作为 TrueHD/Atmos 对象渲染目标")
                                 if (srcCh != null && srcCh != (LayoutCh[get("layout")] ?: 0)) {
                                     Text(
                                         "⚠ 当前 HAL 源只有 " + srcCh + "ch" + (if (srcRate != null) " / " + srcRate + "Hz" else "") +
