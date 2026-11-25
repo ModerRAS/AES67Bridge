@@ -70,6 +70,7 @@ internal val ConfDefault = mapOf(
     "split" to "1", "sap" to "1", "gain_db" to "0", "limiter_db" to "-1",
     "hal_buf" to "20", "fifo_kb" to "32", "ptp" to "0",
     "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0", "pt" to "",
+    "http_port" to "8080",
     "pcm_export" to "1", "bits_export" to "1", "boot" to "1",
     "engine" to "legacy", "decode" to "auto"
 )
@@ -423,7 +424,7 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     OptChip("开", selected = get("sap") == "1") { set("sap", "1") }
                                     OptChip("关", selected = get("sap") == "0") { set("sap", "0") }
                                 }
-                                Hint("开：向 224.2.127.254:9875 周期公告本流 SDP，控制器可自动发现；关：静默发送")
+                                Hint("开：向 224.2.127.254:9875 周期公告本流 SDP，控制器可自动发现（守护空闲时也保持一条静音 RTP 流，随时能被发现）；关：静默发送。也可以用 HTTP 拉 SDP：http://芝杜IP:" + (get("http_port").ifEmpty { "8080" }) + "/aes67.sdp（http_port=0 关闭）")
                             }
                             if (cat == 1) {
                                 RowLabel("PCM 导出") {

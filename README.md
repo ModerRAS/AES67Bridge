@@ -31,3 +31,9 @@ Vendored 第三方组件保留其原始许可证：
 以上均与 GPL-3.0 兼容。
 
 仓库不包含 Zidoo 固件自带的专有二进制（Amlogic HAL `audio.primary.amlogic.so` 原厂库等）；构建 App 时从自己的设备 `adb pull`，见 [BUILD.md](BUILD.md)。
+
+## 发现与接入（AES67 / RAVENNA 控制器）
+
+- **SAP**：守护运行期间持续向 `224.2.127.254:9875` 公告 SDP（RFC 2974：IPv4 announce/delete、TTL 255、删除包只带 `o=` 行、每个 RTP flow 一个会话）。空闲时也会保持一条**静音 RTP 流**，所以控制器（如 aes67-linux-daemon 的 SAP 浏览）随时能发现并配置本源，不必等音乐/电影开播。
+- **HTTP SDP 拉取**：`http://<设备IP>:8080/aes67.sdp`（`daemon.conf http_port=8080`，`0` 关闭）。不支持 SAP 的控制器可以直接拉这份 SDP 配置 Sink。
+- 已知限制：输出超过 8ch 时守护按 flow 拆流，每个 flow 目前是独立的 SAP 会话；严格 AES67 多流应在一个 SDP 里用多个 `m=` 段描述（后续合并）。

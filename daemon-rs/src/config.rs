@@ -293,6 +293,9 @@ pub struct Config {
     pub fifo: String,
     pub meta: String,
     pub sdp: String,
+    /// HTTP port that serves the current SDP at /aes67.sdp (0 disables it).
+    /// Controllers that do not use SAP can pull the description instead.
+    pub http_port: u16,
     pub status: String,
     pub conf: String,
     pub lock: String,
@@ -370,6 +373,7 @@ impl Default for Config {
             fifo: crate::DEFAULT_FIFO.to_string(),
             meta: crate::DEFAULT_META.to_string(),
             sdp: crate::DEFAULT_SDP.to_string(),
+            http_port: 0,
             status: crate::DEFAULT_STATUS.to_string(),
             conf: crate::DEFAULT_CONF.to_string(),
             lock: crate::DEFAULT_LOCK.to_string(),
@@ -547,7 +551,7 @@ impl Config {
 [--codec pcm|bits|auto|eac3|truehd|l16] [--encoding l24|l16] [--pt N] [--mtu 1500] [--target-layout L] \
 [--split] [--no-split] [--legacy-split] [--buffer-ms 100] [--prebuffer-ms 20] \
 [--ch N] [--rate R] \
-[--local-ip IP|auto] [--resampler rubato|c-poly] [--sap] [--sap-interval S] \
+[--local-ip IP|auto] [--resampler rubato|c-poly] [--sap] [--sap-interval S] [--http-port P] \
 [--source-filter] [--labels L,R,...] [--channel-map 0,1,...] \
 [--ptp] [--ptp-domain D] [--ptp-master IP|--ptp-gm IP] [--ptp-interface IP] \
 [--ssrc HEX] [--log PATH] [--trace-data N]"
@@ -576,6 +580,12 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
             cfg.maxch = value
                 .parse()
                 .map_err(|_| format!("{origin}: bad maxch '{value}'"))?
+        }
+        "http_port" | "sdp_port" => {
+            cfg.http_port = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{origin}: bad http_port '{value}'"))?
         }
         "layout" => cfg.layout = value.trim().to_string(),
         "bits" => cfg.bits = value.to_string(),
@@ -876,6 +886,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
                     "c-poly" | "cpoly" | "poly" => ResamplerKind::CPoly,
                     other => return Err(format!("--resampler {other} (rubato|c-poly)")),
                 }
+            }
+            "--http-port" => {
+                cfg.http_port = next(&mut index, args)?.parse().unwrap_or(0);
             }
             "--sap" => cfg.sap = true,
             "--sap-interval" => {

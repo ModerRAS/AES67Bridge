@@ -225,6 +225,9 @@ impl Daemon {
             let rc = platform::sched_fifo(cfg.sched_fifo);
             logln!("SCHED_FIFO prio={} rc={}", cfg.sched_fifo, rc);
         }
+        if cfg.http_port > 0 {
+            spawn_sdp_http_server(cfg.http_port, cfg.sdp.clone(), local_ip);
+        }
         // codec=bits: consume the HAL tee raw compressed ES (live.bits) and
         // decode E-AC-3 / AC-3 core PCM. This path never reads live.pcm and is
         // selected explicitly so the PCM transport contract stays untouched.
@@ -235,6 +238,114 @@ impl Daemon {
             return self.run_bits(&cfg, false);
         }
         self.run_pcm(&cfg, false)
+    }
+
+    /// Keep a silent AES67 session up while no live source exists.
+    /// SAP only describes a running session, so announcing while idle needs a real
+    /// RTP stream: this sends packet-timed silence at the configured layout/PT and
+    /// lets aes67-daemon (or any SAP browser) discover and configure the source at
+    /// any time, not just while music/movie is playing.
+    fn run_idle_session(&mut self, cfg: &Config) -> Result<i32, (i32, String)> {
+        let layout_id = cfg.layout.trim();
+        if layout_id.is_empty() {
+            return Err((EXIT_USAGE, "idle session needs a configured layout".to_string()));
+        }
+        let channels = crate::config::layout_channels(layout_id)
+            .unwrap_or_else(|| cfg.maxch.max(2))
+            .max(1);
+        let layout_plan = rendered_layout_plan(layout_id, layout_id, channels);
+        let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
+            .ok_or((EXIT_USAGE, format!("unsupported ptime {} us", cfg.ptime_us)))?;
+        let encoding = if cfg.encoding == Encoding::L24 {
+            RtpEncoding::L24
+        } else {
+            RtpEncoding::L16
+        };
+        let group_ip = cfg.group_ip();
+        let local_ip = cfg.local_ip.unwrap_or_else(|| {
+            platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        });
+        let plan = plan_flows(cfg, &timing, encoding, layout_plan.channels, platform::now_ns())
+            .map_err(|message| (EXIT_USAGE, message))?;
+        let mut ring_cfg = cfg.clone();
+        ring_cfg.buffer_ms = ring_cfg.buffer_ms.max(2_000);
+        ring_cfg.prebuffer_ms = ring_cfg.prebuffer_ms.min(ring_cfg.buffer_ms / 4);
+        let (session, ptp_mode) = start_session_with_ptp_fallback(
+            &ring_cfg,
+            local_ip,
+            &timing,
+            encoding,
+            &layout_plan,
+            &plan,
+            self.ptp_mode,
+        )
+        .map_err(|message| (EXIT_USAGE, message))?;
+        self.ptp_mode = ptp_mode;
+        publish_sdp(&session, cfg, &plan, &self.shared);
+        logln!(
+            "IDLE session up layout={} ch={} flows={} ptp={} (silent RTP keeps SAP discoverable)",
+            layout_plan.output_layout,
+            channels,
+            plan.len(),
+            self.ptp_mode
+        );
+        let shape = StreamShape {
+            channels,
+            source_channels: channels,
+            map: (0..channels).collect(),
+            layout: layout_plan.output_layout.clone(),
+            rate: crate::OUT_RATE,
+            fmt: SampleFmt::S16,
+            stream_id: 0,
+        };
+        let frames = timing.samples_per_packet().max(1) as usize;
+        let zeros = vec![0.0f32; frames * channels];
+        let mut first = 0u64;
+        let mut last_status_ns = platform::now_ns();
+        loop {
+            if platform::stop_requested() {
+                break;
+            }
+            if auto_source(cfg) != AutoSource::Idle {
+                logln!("IDLE session released: a live source appeared");
+                break;
+            }
+            let mut rc = 0;
+            let mut attempts = 0u32;
+            loop {
+                rc = unsafe { session.submit(first, zeros.as_ptr(), frames, channels) };
+                if rc != -7 || attempts >= 500 {
+                    break;
+                }
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if rc == 0 {
+                first += frames as u64;
+            }
+            let now = platform::now_ns();
+            if now - last_status_ns > 1_000_000_000 {
+                last_status_ns = now;
+                let parts = StatusParts {
+                    rs_in: crate::OUT_RATE as u64,
+                    rs_out: crate::OUT_RATE as u64,
+                    submitted: first,
+                    levels: [-120.0f64; MAX_CH],
+                    src_active: false,
+                    src_age_ms: 0,
+                    src_codec: "none",
+                    src_rate: crate::OUT_RATE,
+                    _marker: std::marker::PhantomData,
+                };
+                write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let rc = session.stop(2_000);
+        if rc != 0 {
+            logln!("WARN IDLE session stop code={rc}");
+        }
+        Ok(EXIT_OK)
     }
 
     /// codec=auto: probe both HAL tee sources and run whichever one is live.
@@ -248,7 +359,6 @@ impl Daemon {
             cfg.bits_meta,
             cfg.meta
         );
-        let mut last_idle_ns = 0i64;
         loop {
             if platform::stop_requested() {
                 return Ok(EXIT_OK);
@@ -287,13 +397,18 @@ impl Daemon {
                     }
                 }
                 AutoSource::Idle => {
-                    let now = platform::now_ns();
-                    if now - last_idle_ns > 1_000_000_000 {
-                        last_idle_ns = now;
-                        write_idle_status(cfg, self.ptp_mode);
-                        logln!("AUTO idle: waiting for a live HAL source");
+                    // Keep a silent session up while idle: SAP only describes a
+                    // running session, and controllers must be able to discover /
+                    // configure the source at any time, not just during playback.
+                    match self.run_idle_session(cfg) {
+                        Ok(_) => {}
+                        Err((EXIT_USAGE, message)) => return Err((EXIT_USAGE, message)),
+                        Err((code, message)) => {
+                            logln!("WARN AUTO idle session failed code={code}: {message}");
+                            write_idle_status(cfg, self.ptp_mode);
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
                     }
-                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -2356,6 +2471,54 @@ fn write_atomic(path: &str, body: &[u8]) -> io::Result<()> {
 /// Write a heartbeat status while the daemon is waiting for a stream (no session
 /// yet) or between TrueHD blocks. The TV app treats a missing/stale status file as
 /// "daemon not running", so the file must refresh at >=1 Hz even when idle.
+/// Minimal SDP pull endpoint. SAP is the AES67 discovery path, but many
+/// controllers (and aes67-daemon's web UI) can also ingest an SDP that is fetched
+/// over HTTP; serving http://<bridge>:<port>/aes67.sdp keeps the description
+/// available even to receivers that do not browse SAP.
+fn spawn_sdp_http_server(port: u16, sdp_path: String, local_ip: Ipv4Addr) {
+    let spawned = std::thread::Builder::new()
+        .name("sdp-http".to_string())
+        .spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let listener = match std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)) {
+                Ok(listener) => listener,
+                Err(err) => {
+                    logln!("WARN SDP HTTP bind :{port} failed: {err}");
+                    return;
+                }
+            };
+            logln!("SDP HTTP server: http://{local_ip}:{port}/aes67.sdp");
+            for connection in listener.incoming() {
+                let Ok(mut stream) = connection else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..read]);
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let wants_sdp = path.to_ascii_lowercase().ends_with(".sdp");
+                let (content_type, body) = if wants_sdp {
+                    match std::fs::read_to_string(&sdp_path) {
+                        Ok(text) => ("application/sdp", text),
+                        Err(err) => ("text/plain", format!("SDP unavailable: {err}\n")),
+                    }
+                } else {
+                    (
+                        "text/plain",
+                        format!("AES67Bridge SDP server\nGET /aes67.sdp\n"),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+    if let Err(err) = spawned {
+        logln!("WARN SDP HTTP thread spawn failed: {err}");
+    }
+}
+
 /// Codec-router state (codec=auto): which HAL tee source is live right now.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AutoSource {
