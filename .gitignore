@@ -1,4 +1,4 @@
-# build outputs
+﻿# build outputs
 out/
 classes/
 target/
@@ -15,8 +15,6 @@ target/
 # media/test artifacts
 *.wav
 *.mp4
-*.png
-*.jpg
 # misc
 .DS_Store
 Thumbs.db
