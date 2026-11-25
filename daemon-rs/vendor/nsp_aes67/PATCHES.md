@@ -61,6 +61,18 @@ into the unsupported fallback and failed to compile (`name` undefined). The
 Linux branches now cover `any(target_os = "linux", target_os = "android")`,
 which is also correct at runtime (Android is Linux).
 
+## 9. `src/session/mod.rs` (dropped counter)
+`Session::submit` added `frames` to `counters.dropped` when the ring copy
+failed (ring full) and returned `QUEUE_FULL`. The bridge daemon reacts to
+`QUEUE_FULL` by applying backpressure and retrying the *same* frame index
+(`daemon-rs/src/daemon.rs`, "PCM permanent-silence" fix), so no audio is lost
+on that path — but every retry still incremented the counter. A saturated ring
+therefore reported hundreds of millions of "dropped" frames in `status.json`
+while the RTP stream itself was intact (measured 2026-11-25: 435k frames/s of
+phantom drops during a 12ch soak whose received audio had zero discontinuities).
+The ring-full branch now returns `QUEUE_FULL` without touching the counter;
+`audio.discard` and oversized chunks still count as drops.
+
 ## Upstream follow-ups
 These patches are candidates for the NSP `feat/aes67-std-ports-rates-ptime`
 branch: local-clock mode, SDP local refclk, multi-flow `Output::send` fix and

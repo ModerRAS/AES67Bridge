@@ -350,7 +350,10 @@ impl Session {
                 0
             }
             None => {
-                lock(&run.counters).dropped += frames as u64;
+                // Ring full. The caller keeps the audio and retries the same
+                // frame index (daemon.rs submit backpressure), so nothing is
+                // lost here; counting it as dropped made the UI "drops" field
+                // grow without bound whenever the ring saturated.
                 QUEUE_FULL
             }
         }
