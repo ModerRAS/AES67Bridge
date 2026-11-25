@@ -1,6 +1,6 @@
 [package]
 name = "aes67-bridge-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "AES67Bridge device-side sender daemon (Rust port of aes67_rtp_sender C daemon)"

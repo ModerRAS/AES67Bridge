@@ -4,6 +4,7 @@ import java.io.File
 
 data class Status(
     val hasData: Boolean = false,
+    val version: String = "",
     val codec: String = "",
     val enc: String = "",
     val rate: String = "",
@@ -109,6 +110,7 @@ fun readStatus(): Status {
     val hasSource = streamId > 0 && metaId > 0 && metaId >= streamId
     return Status(
         hasData = age in 0..5000,
+        version = grab(Regex("\"version\"\\s*:\\s*\"([0-9.]+)\""), js),
         codec = grab(Regex("\"codec\"\\s*:\\s*\"([a-zA-Z0-9_]+)\""), js),
         enc = grab(Regex("\"encoding\"\\s*:\\s*\"([A-Za-z0-9]+)\""), js),
         rate = grab(Regex("\"rate\"\\s*:\\s*(\\d+)"), js),

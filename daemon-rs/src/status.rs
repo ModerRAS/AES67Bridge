@@ -90,8 +90,9 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     let mut out = String::with_capacity(1024);
     let _ = write!(
         out,
-        "{{\"ts\":{},\"mode\":\"{}\",\"hal\":\"running\",\"group\":\"{}\",\"port\":{},\"maxch\":{},\"layout\":\"{}\",\"codec\":\"{}\",\"flows\":{},\"split_mode\":\"{}\",",
+        "{{\"ts\":{},\"version\":\"{}\",\"mode\":\"{}\",\"hal\":\"running\",\"group\":\"{}\",\"port\":{},\"maxch\":{},\"layout\":\"{}\",\"codec\":\"{}\",\"flows\":{},\"split_mode\":\"{}\",",
         platform::realtime_ms(),
+        env!("CARGO_PKG_VERSION"),
         snapshot.mode,
         snapshot.group,
         snapshot.port,

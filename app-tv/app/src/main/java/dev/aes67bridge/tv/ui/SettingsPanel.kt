@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,7 +40,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.aes67bridge.tv.UpdateManager
 import java.io.File
+import kotlinx.coroutines.launch
 
 private val PBg = Color(0xFF0B1219)
 private val PAccent = Color(0xFF35D0A5)
@@ -72,7 +75,7 @@ internal val ConfDefault = mapOf(
     "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0", "pt" to "",
     "http_port" to "8080",
     "pcm_export" to "1", "bits_export" to "1", "boot" to "1",
-    "engine" to "legacy", "decode" to "auto"
+    "engine" to "rust", "decode" to "auto"
 )
 
 /** 完整配置：默认值打底 + 当前已加载/修改的值（保证 daemon.conf 每次写全，不再丢 sap 这类键）。 */
@@ -285,6 +288,8 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     val srcCh = remember { srcSt.ch.toIntOrNull() }
     val srcRate = remember { srcSt.rate.takeIf { it.isNotEmpty() } }
 
+    val scope = rememberCoroutineScope()
+    var autoUpdateOn by remember { mutableStateOf(UpdateManager.autoUpdateEnabled(ctx)) }
     var page by remember { mutableStateOf(0) }
     var gAddr by remember { mutableStateOf("") }
     var gPort by remember { mutableStateOf("") }
@@ -499,11 +504,6 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 Hint("ASRC 做采样率自适应补偿，PTP 锁定后用；未锁定时保持关闭")
                             }
                             if (cat == 3) {
-                                RowLabel("引擎") {
-                                    OptChip("Rust（新）", selected = get("engine") == "rust") { set("engine", "rust") }
-                                    OptChip("C（兼容）", selected = get("engine") == "legacy") { set("engine", "legacy") }
-                                }
-                                Hint("Rust：支持 TrueHD/Atmos 对象渲染、EAC3 解码、布局交集；C：仅 PCM/AC3 兼容路径（保留用于回退）")
                                 RowLabel("开机自启") {
                                     OptChip("开", selected = get("boot") == "1") { set("boot", "1") }
                                     OptChip("关", selected = get("boot") == "0") { set("boot", "0") }
@@ -515,10 +515,42 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 RowLabel("危险") {
                                     OptChip("回滚原厂 HAL") { onApply(mapOf("rollback" to "1")) }
                                 }
-                                Text(
-                                    "AES67Bridge 0.1.0 · status socket 实时", color = PDim, fontSize = 12.sp,
-                                    modifier = Modifier.padding(top = 8.dp)
-                                )
+                            }
+                            if (cat == 3) {
+                                Hint("") // separator
+                                RowLabel("自动更新") {
+                                    OptChip("开", selected = autoUpdateOn) {
+                                        autoUpdateOn = true
+                                        UpdateManager.setAutoUpdate(ctx, true)
+                                    }
+                                    OptChip("关", selected = !autoUpdateOn) {
+                                        autoUpdateOn = false
+                                        UpdateManager.setAutoUpdate(ctx, false)
+                                    }
+                                }
+                                Hint("开：每次启动最多 6 小时检查一次 release/latest.json，有新版本自动静默安装（APK + 守护）；关：只手动检查")
+                                RowLabel("版本") {
+                                    Text(
+                                        "App v" + UpdateManager.currentVersionName() +
+                                            "  ·  守护 " + (srcSt.version.ifEmpty { "?" }),
+                                        color = PText, fontSize = 13.sp,
+                                        modifier = Modifier.padding(vertical = 6.dp)
+                                    )
+                                }
+                                RowLabel("更新") {
+                                    OptChip(if (UpdateManager.busy) "检查中…" else "检查更新", muted = UpdateManager.busy) {
+                                        scope.launch { UpdateManager.check(ctx) }
+                                    }
+                                    val rel = UpdateManager.available
+                                    if (rel != null && UpdateManager.isNewer(rel)) {
+                                        OptChip("安装 v" + rel.versionName, accent = true) {
+                                            scope.launch { UpdateManager.applyUpdate(ctx, rel) }
+                                        }
+                                    }
+                                }
+                                if (UpdateManager.status.isNotEmpty()) {
+                                    Hint(UpdateManager.status)
+                                }
                             }
                         }
                     }
@@ -527,6 +559,10 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                         OptChip("应用设置", accent = true) { onApply(applyMap()) }
                         OptChip("应用并重启守护") { onApply(applyMap(mapOf("restart" to "1"))) }
                     }
+                    Text(
+                        "AES67Bridge " + UpdateManager.currentVersionName() + " · status socket 实时",
+                        color = PDim, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)
+                    )
                 }
 
                 // ---- 自定义组播（手写地址/端口）----

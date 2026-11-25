@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'release/latest.json'
+      - '**.md'
+      - 'HANDOFF/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon-rs
+      - name: Host unit tests
+        run: cargo test --manifest-path daemon-rs/Cargo.toml --lib
+
+  daemon-armv7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager --install "ndk;27.2.12479018"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon-rs
+      - name: Build aes67-daemon (Android armv7)
+        run: |
+          rm -f daemon-rs/.cargo/config.toml
+          NDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang"
+          cargo build --manifest-path daemon-rs/Cargo.toml --release --target armv7-linux-androideabi --bin aes67-daemon
+          ls -l daemon-rs/target/armv7-linux-androideabi/release/aes67-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aes67-daemon-armv7
+          path: daemon-rs/target/armv7-linux-androideabi/release/aes67-daemon
+
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK pieces + NDK
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+      - name: Build HAL tee proxy
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          bash device/haltee-proxy/build.sh
+          cp device/haltee-proxy/out/audio.primary.amlogic.so app-tv/app/src/main/assets/
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build debug APK
+        run: gradle -p app-tv assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app-tv/app/build/outputs/apk/debug/app-debug.apk

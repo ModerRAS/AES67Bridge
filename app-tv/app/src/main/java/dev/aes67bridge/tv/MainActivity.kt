@@ -20,12 +20,17 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
+import androidx.lifecycle.lifecycleScope
 import androidx.tv.material3.darkColorScheme
 import dev.aes67bridge.tv.ui.ConsoleScreen
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Auto-update: at most once per 6 h; installs through the firmware root bridge when a
+        // newer release is published (release/latest.json). Never blocks the UI.
+        lifecycleScope.launch { UpdateManager.autoCheck(applicationContext) }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
                 primary = Color(0xFF35D0A5),

@@ -1,6 +1,5 @@
 #!/system/bin/sh
-# AES67 autostart rollback (root) — stop everything, restore stock audio.
-# Keeps /data/aes67bridge itself (state.txt=rolledback); removes the daemon copy (handled by rollback).
+# rollback.sh (root) - stop everything, restore the stock audio HAL.
 set -u
 ROOT=/data/aes67bridge
 OVL=$ROOT/ovl
@@ -10,10 +9,8 @@ chown root:root "$ROOT/logs"
 chmod 0700 "$ROOT/logs"
 echo "=== $(date) rollback ==="
 
-# 1) stop the C daemon (only aes67_rtp_send*; Rust aes67-daemon/aes67-feed are left alone)
-for p in $(pidof aes67_rtp_sender); do kill -9 "$p" 2>/dev/null; done
-rm -f "$ROOT/aes67_rtp_sender"
-rm -f /data/aes67bridge/legacy/restart-daemon.sh
+# 1) stop the Rust daemon
+for p in $(pidof aes67-daemon); do kill -9 "$p" 2>/dev/null; done
 
 # 2) stop live/mode flags
 rm -f "$ROOT/live.enable" "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes"
@@ -32,7 +29,7 @@ sleep 2
 setprop ctl.restart audioserver
 sleep 2
 
-# 4) clear status, mark rolled back (no transitional status files)
+# 4) clear status, mark rolled back
 rm -f "$ROOT/status.json"
 echo rolledback > "$ROOT/state.txt"
 chown root:root "$ROOT/state.txt" 2>/dev/null
@@ -40,7 +37,6 @@ chmod 0644 "$ROOT/state.txt"
 {
   echo "time=$(date)"
   echo "hal=$(getprop init.svc.vendor.audio-hal)"
-  echo "daemon="
   echo "overlay=$(grep -c ' /vendor/lib/hw overlay' /proc/mounts)"
   echo "live="
 } >> "$ROOT/logs/rollback.log" 2>&1

@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK pieces + NDK
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon-rs
+
+      - name: Build aes67-daemon (armv7)
+        run: |
+          rm -f daemon-rs/.cargo/config.toml
+          NDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi23-clang"
+          cargo build --manifest-path daemon-rs/Cargo.toml --release --target armv7-linux-androideabi --bin aes67-daemon
+
+      - name: Build HAL tee proxy
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          bash device/haltee-proxy/build.sh
+          cp device/haltee-proxy/out/audio.primary.amlogic.so app-tv/app/src/main/assets/
+
+      - name: Prepare signing material
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app-tv/keystore.jks
+          printf '%s\n' "$KEYSTORE_PROPERTIES" > app-tv/keystore.properties
+          chmod 600 app-tv/keystore.jks app-tv/keystore.properties
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build APK
+        id: build
+        run: |
+          if [ -f app-tv/keystore.jks ]; then
+            gradle -p app-tv assembleRelease --no-daemon
+            APK=app-tv/app/build/outputs/apk/release/app-release.apk
+          else
+            echo "::warning::No signing secrets; releasing a debug-signed APK (cross-build auto-update will fail)."
+            gradle -p app-tv assembleDebug --no-daemon
+            APK=app-tv/app/build/outputs/apk/debug/app-debug.apk
+          fi
+          echo "APK=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Package release assets
+        id: pkg
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp "${{ steps.build.outputs.APK }}" "dist/AES67Bridge-${VERSION}.apk"
+          cp daemon-rs/target/armv7-linux-androideabi/release/aes67-daemon "dist/aes67-daemon-armv7-${VERSION}"
+          cp device/haltee-proxy/out/audio.primary.amlogic.so "dist/audio.primary.amlogic.so-armv7-${VERSION}"
+          ( cd dist && sha256sum * > SHA256SUMS )
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "AES67Bridge ${GITHUB_REF_NAME}" \
+            --generate-notes
+
+      - name: Update release/latest.json and push
+        run: |
+          VERSION="${{ steps.pkg.outputs.VERSION }}"
+          TAG="${GITHUB_REF_NAME}"
+          python3 - "$VERSION" "$TAG" <<'PY'
+          import hashlib, json, os, re, sys
+          from datetime import datetime, timezone
+          version, tag = sys.argv[1], sys.argv[2]
+          gradle = open("app-tv/app/build.gradle.kts", encoding="utf-8").read()
+          version_code = int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1))
+          def info(path, name):
+              data = open(path, "rb").read()
+              return {
+                  "url": f"https://github.com/ModerRAS/AES67Bridge/releases/download/{tag}/{name}",
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "size": len(data),
+              }
+          daemon = info(f"dist/aes67-daemon-armv7-{version}", f"aes67-daemon-armv7-{version}")
+          daemon["version"] = version
+          payload = {
+              "tag": tag,
+              "versionCode": version_code,
+              "versionName": version,
+              "publishedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "notes": f"AES67Bridge {version}",
+              "apk": info(f"dist/AES67Bridge-{version}.apk", f"AES67Bridge-{version}.apk"),
+              "daemon": daemon,
+          }
+          with open("release/latest.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, indent=2)
+              f.write("\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add release/latest.json
+          git commit -m "release: latest.json for ${GITHUB_REF_NAME} [skip ci]" || exit 0
+          git push origin HEAD:main

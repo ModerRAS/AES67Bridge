@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Apply UI config (single source of truth = /data/aes67bridge/daemon.conf), then restart daemon.
+# Apply UI config (single source of truth = /data/aes67bridge/daemon.conf), then restart the daemon.
 # Mode is DERIVED from hal_buf: 20 -> normal (20ms), 5 -> lowlat (5ms).
 set -u
 APP=/data/aes67bridge/stage
@@ -10,8 +10,8 @@ umask 027
 mkdir -p "$ROOT/logs"
 chown root:root "$ROOT/logs"
 chmod 0700 "$ROOT/logs"
-# App 私有目录是 GUI 写入的唯一配置源：应用设置时必须先从那里同步到 stage，
-# 否则 stage 里还是上一次 start.sh 同步的旧配置（sap 等键会因此丢失）。
+# The app private dir is the only config source the GUI writes; sync it to the stage
+# first, otherwise the stage still holds the previous start.sh copy (keys like sap vanish).
 APPDIR=/data/user/0/dev.aes67bridge.tv/files
 if [ -f "$APPDIR/daemon.conf" ]; then cp -f "$APPDIR/daemon.conf" "$APP/daemon.conf" 2>/dev/null; fi
 if [ -f "$APP/daemon.conf" ]; then cp -f "$APP/daemon.conf" "$CONF"; fi
@@ -43,13 +43,6 @@ else
   rm -f "$ROOT/live.enable"
 fi
 chmod 0644 "$ROOT/live.enable" 2>/dev/null
-
-# daemon binary must exist (rollback removes it); reinstall from the app stage
-if [ ! -x "$ROOT/aes67_rtp_sender" ] && [ -f "$APP/haltee_rtp_sender" ]; then
-  cp -f "$APP/haltee_rtp_sender" "$ROOT/aes67_rtp_sender"
-  chown root:root "$ROOT/aes67_rtp_sender"
-  chmod 0750 "$ROOT/aes67_rtp_sender"
-fi
 
 if [ -f "$APP/restart.sh" ]; then
   sh "$APP/restart.sh" >> "$LOG" 2>&1

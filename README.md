@@ -10,13 +10,17 @@ Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
 - `dolby-pipeline/`：TrueHD/EAC3 解析解码 + 对象渲染管线（vendored truehd/eac3/oamd/roar）。
 - `device/haltee-proxy/`：vendor audio HAL 代理 `.so`（tmpfs overlay，不修改物理分区）。
 - `device/boot-hook/`：开机自启钩子。本固件在 boot 时会把所有第三方 App 置 `stopped=true`（收不到 `BOOT_COMPLETED`），因此自启不使用 App 广播，而是把两条非持久属性写入 `/data/property/persistent_properties`，借固件自带的 root 命令桥（`zd_root_cmd.sh`）在每次开机以 root 执行 `start.sh`。安装：`device/boot-hook/install.ps1`。
-- `device/daemon/`：早期 C 版 FIFO → SRC → L24 RTP 守护（legacy 引擎）。
-- `app/`：早期 Java 控制台（`dev.aes67bridge.console`）。
 - `ravenna-discovery/`：RAVENNA/mDNS 探索（暂停）。
 
-构建见 [BUILD.md](BUILD.md)：daemon（cargo armv7）、HAL 代理（`device/haltee-proxy/build.ps1`，自动找 NDK）、TV App（Gradle，assets 里三个二进制由仓库源码构建或从设备拉取，不入库）。
+构建见 [BUILD.md](BUILD.md)：daemon（cargo armv7）、HAL 代理（`device/haltee-proxy/build.ps1`，自动找 NDK）、TV App（Gradle；代理与 daemon 由仓库源码构建，原厂 HAL 备份由设备自行 provision，不入库）。CI/CD 见 `.github/workflows/`：push 构建测试，tag `v*` 自动发布 Release（APK + daemon + SHA256），TV App 内置自动更新（读 `release/latest.json`）。
 
 运行时所有文件在设备单一目录 `/data/aes67bridge/`（daemon.conf、live.bits/live.pcm FIFO、aes67.sdp、status.json 等）；`aes67boot.sh` 的日志在 `/data/aes67bridge/logs/boot.log`。
+
+## 发布与自动更新
+
+- **CI**（`.github/workflows/ci.yml`）：push/PR 时跑 Rust 测试 + armv7 daemon 构建 + Android APK 构建。
+- **CD**（`.github/workflows/release.yml`）：推 `v*` tag 时自动构建 daemon/代理/APK，生成 SHA256 与 `release/latest.json`，发布 GitHub Release 并把 `latest.json` 提交回 `main`。
+- **自动更新**：App 内「设置 → 更新」检查 `https://raw.githubusercontent.com/ModerRAS/AES67Bridge/main/release/latest.json`（固定路径 JSON，不走 GitHub API 限额），下载后校验 SHA256；芝杜有 root，APK 与 daemon 二进制都通过固件的 root 命令桥静默安装并重启，无需人工点装。
 
 ## License
 

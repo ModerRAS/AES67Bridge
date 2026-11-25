@@ -56,17 +56,23 @@ class AutoStartService : Service() {
     }
 
     private fun extractAll(dir: String) {
+        // audio.primary.amlogic.so.orig is optional: release APKs ship only the proxy and
+        // bootstrap.sh provisions the stock HAL backup from the device itself on first run.
         val names = listOf(
-            "bootstrap.sh", "start.sh", "stop.sh", "restart.sh", "rollback.sh", "purge.sh", "mode-lowlat.sh", "mode-normal.sh", "apply-config.sh",
-            "restart-daemon.sh", "purge.sh",
-            "audio.primary.amlogic.so", "audio.primary.amlogic.so.orig", "haltee_rtp_sender"
+            "bootstrap.sh", "start.sh", "stop.sh", "restart.sh", "rollback.sh", "purge.sh",
+            "mode-lowlat.sh", "mode-normal.sh", "apply-config.sh",
+            "audio.primary.amlogic.so", "audio.primary.amlogic.so.orig"
         )
         for (n in names) {
-            val f = File(dir, n)
-            assets.open(n).use { input -> FileOutputStream(f).use { out -> input.copyTo(out) } }
-            f.setReadable(true, false)
-            f.setExecutable(true, false)
-            diag("extracted " + n + " size=" + f.length())
+            try {
+                val f = File(dir, n)
+                assets.open(n).use { input -> FileOutputStream(f).use { out -> input.copyTo(out) } }
+                f.setReadable(true, false)
+                f.setExecutable(true, false)
+                diag("extracted " + n + " size=" + f.length())
+            } catch (t: Throwable) {
+                diag("asset skipped " + n + ": " + t)
+            }
         }
     }
 

@@ -167,7 +167,8 @@ impl Daemon {
             RtpEncoding::L16
         };
         logln!(
-            "v0.1 start fifo={} meta={} sdp={} status={} conf={} lock={} group={} port={} ptime_us={} maxch={} layout={} codec={} encoding={} pt={} mtu={} split={} ch={} rate={} seconds={:.0} local_ip={} resampler={:?} ptp={} ptp_gm={:?} ptp_domain={} sap={}",
+            "v{} start fifo={} meta={} sdp={} status={} conf={} lock={} group={} port={} ptime_us={} maxch={} layout={} codec={} encoding={} pt={} mtu={} split={} ch={} rate={} seconds={:.0} local_ip={} resampler={:?} ptp={} ptp_gm={:?} ptp_domain={} sap={}",
+            env!("CARGO_PKG_VERSION"),
             cfg.fifo,
             cfg.meta,
             cfg.sdp,
