@@ -8,9 +8,9 @@
 ## 0. 结论先行（集成者只需读这一段）
 
 1. **输入**：daemon 持续读 `/data/haltee/live.bits`（TrueHD/AC3/E-AC3/DTS 原始字节流），把读到的字节**原样**交给 `dolby_pipeline::ObjectPipeline::push_bits(&[u8])`。不要剥 4B、不要找 IEC61937 前导、不要按 burst 切分（阶段 0 结论，见 `artifacts/aes67/roar-armv7-bench-2026-11-24.md` §4）。
-2. **输出**：`push_bits` 返回 `Vec<dolby_pipeline::Block>`（每次 0..N 个）。每个 Block = **480 帧（48 kHz 下 10 ms）、planar f32、按 `Block::actual` 布局排列**。daemon 负责 L16/L24 打包、按 ≤8ch 拆流、RTP/SDP/status；**SDP 与 status 必须发布 `Block::actual` 的布局（标签/通道数/流数）**，不是 target。
-3. **布局**：target = 启动时向后端声明的最大布局（daemon.conf `layout=`）；actual = target ∩ source 的交集。source 多出的通道**丢弃 + warning，不做下混**；target 缺的通道**不补**。strict 是唯一实现；`layout_mode=upmix|downmix|auto` 目前**直接拒绝**（不是 warning 后静默启用）。
-4. **桥内不做自研 DSP**：无 EQ/分频/延迟/房间校正/上混/下混/DRC/dialnorm。只做"对象→扬声器"的 ROAR 渲染、bed 12ch→目标布局的 ROAR 映射、通道身份/布局交集。**唯一例外**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启（−1 dBFS 上限、5 ms look-ahead、硬削波兜底），用于把渲染后超过满刻度的峰值限制住，避免 L24 转换削波；它是渲染器内部能力，不是桥自研 DSP，可通过 `RenderConfig::limiter=false` 关闭。预留 `BlockProcessor` 链（默认空、逐字节透明）仍作为将来 post-render per-channel 插入点。
+2. **输出**：`push_bits` 返回 `Vec<dolby_pipeline::Block>`（每次 0..N 个）。每个 Block = **480 帧（48 kHz 下 10 ms）、planar f32、按 `Block::actual` 布局排列**。管线内部 bed 容器为 **16ch 9.1.6**（`BED_LAYOUT_916`：L R C LFE Ls Rs Lb Rb Lw Rw Tfl Tfr Tbl Tbr Tsl Tsr）；5.1/7.1/7.1.2/7.1.4 内容填入对应扬声器、其余静音，9.1.6 bed 的 Lw/Rw/Tsl/Tsr 不再被丢弃。daemon 只看到 `Block::actual`，看不到容器。固定实体：**解码在每个 major sync 读取 TrueHD `channel_meaning` 的 dialogue_norm，按 Dolby 参考 −31 dBFS 施加常数增益（code−31 dB；31 = 0 dB、27 = −4 dB；>31 的 6-bit 2ch 字段不猜）**，默认开、`--dialnorm 0` 关闭，见 §5。daemon 负责 L16/L24 打包、按 ≤8ch 拆流、RTP/SDP/status；**SDP 与 status 必须发布 `Block::actual` 的布局（标签/通道数/流数）**，不是 target。
+3. **布局**：target = 启动时向后端声明的最大布局（daemon.conf `layout=`）；TrueHD 路径 actual = target（对象可渲染到任意目标扬声器，bed 容器 9.1.6 覆盖所有目标）；**PCM 路径**由 daemon 经 ROAR 渲染（channel-based element 真实源布局 + IAMF 下混，见 daemon 侧文档），SDP/status 报目标布局；未启用时仍为交集。source 多出的通道**丢弃 + warning，不做下混**；target 缺的通道**不补**。strict 是唯一实现；`layout_mode=upmix|downmix|auto` 目前**直接拒绝**（不是 warning 后静默启用）。
+4. **桥内不做自研 DSP**：无 EQ/分频/延迟/房间校正/上混/下混/DRC。只做"对象→扬声器"的 ROAR 渲染、bed 16ch 9.1.6 容器→目标布局的 ROAR 映射、通道身份/布局交集。**例外（Dolby 标准做法）**：dialnorm 常数增益（渲染前施加、见 §5）与 ROAR 自带 look-ahead limiter（渲染后、−1 dBFS）。**唯一例外**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启（−1 dBFS 上限、5 ms look-ahead、硬削波兜底），用于把渲染后超过满刻度的峰值限制住，避免 L24 转换削波；它是渲染器内部能力，不是桥自研 DSP，可通过 `RenderConfig::limiter=false` 关闭。预留 `BlockProcessor` 链（默认空、逐字节透明）仍作为将来 post-render per-channel 插入点。
 5. **采样率**：管线固定 48 kHz（TrueHD 码流本身 48k；ROAR 侧 48k）。44.1k PCM 源由 daemon 在进桥前做 SRC（AES67 传输格式要求，不算音频调校 DSP）。
 6. **失败降级**：解码错误/码流缺口 → 丢弃到下一个 major sync 继续；对象数 >128 → 该 AU 丢弃并计数；ROAR 渲染错误 → 返回 Err，daemon 重建管线（可选 bed-only 降级）；4.1.2 target → 启动期拒绝（ROAR validated patch 无 412 Layout）。
 7. **实测**（Z9X armv7，release，单线程 解码+渲染+块组装）：`bits_20`（5.483 s Atmos）耗时 2.677 s ≈ **4.9 ms / 10 ms 块**；`bits_19` 2.023 s → 0.897 s。分线程（解码/渲染各一线程）后每核约 20–25%，10 ms 节拍余量 >2×。
@@ -128,6 +128,7 @@ pub struct Block {
 ## 5. DSP 边界（桥内自研 DSP = 无；渲染器自带 limiter 默认开）
 
 - **桥内不实现、不启用任何自研 DSP**：EQ、分频、延迟、房间校正、上混/下混、DRC/dialnorm 不做。这些属于"靠近音箱端/后级"的处理。
+- **dialnorm（2026-11-25 决策：做）**：解码器在每个 major sync 读取 FBA `channel_meaning` 的 `twoch/sixch/eightch/sixteench_dialogue_norm`；按 Dolby 参考电平 **−31 dBFS** 换算常数增益 `code − 31 dB`（31 = 参考 = 0 dB，27 = −4 dB；code 0 = 未指定、>31 的 6-bit 2ch 字段不猜测，均按 0 dB），在**渲染前**施加到 bed 与对象 PCM（limiter 仍在最后）。`--dialnorm 0` / `daemon.conf dialnorm=0` 关闭。实测真实 Dolby Atmos 片源 code=31 → 0.00 dB（对参考母版是 no-op）。
 - **例外（2026-11-25 决策）**：ROAR 渲染器自带的 **look-ahead peak limiter** 默认开启，上限 −1 dBFS、look-ahead 5 ms、attack 1 ms、release 200 ms、硬削波兜底（AOM 实现，实时零分配）。理由：ROAR 渲染输出的峰值实测可达 1.13–1.46（>0 dBFS），直接定标到 L24 会削波；limiter 把峰值限制在 −1 dBFS 以内。关闭方式：`RenderConfig::limiter = false`。启用后输出有 5 ms（240 样本）延迟，末块尾部由 daemon 丢帧即可（连续流不影响）。
 - 唯一的**自研**插入点（预留给将来，**默认空链**）：
 
