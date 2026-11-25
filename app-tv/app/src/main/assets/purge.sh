@@ -20,8 +20,8 @@ rm -rf "$ROOT/logs"/*
 
 # 3) legacy daemon copies from the pre-consolidation layout
 rm -f /data/local/tmp/aes67_rtp_sender
-rm -f /data/local/tmp/haltee/restart-daemon.sh
-rmdir /data/local/tmp/haltee 2>/dev/null
+rm -f /data/aes67bridge/legacy/restart-daemon.sh
+rmdir /data/aes67bridge/legacy 2>/dev/null
 
 echo "purged; remaining entries (binaries/config kept):"
 ls -l "$ROOT" 2>&1

@@ -23,7 +23,7 @@ rm -f "$ROOT"/aes67.sdp "$ROOT"/aes67-v4.sdp 2>/dev/null
 
 if [ "$engine" = "rust" ]; then
   BIN=$ROOT/aes67-daemon
-  [ -x "$BIN" ] || BIN=/data/local/tmp/aes67-rust/aes67-daemon
+  [ -x "$BIN" ] || BIN=/data/aes67bridge/legacy/aes67-daemon
   if [ ! -x "$BIN" ]; then echo "$(date) ERROR rust daemon missing" >> "$LOG"; exit 1; fi
   PTPARG=""
   [ "$ptp" = "1" ] && PTPARG="--ptp --ptp-domain ${ptp_domain:-0}"
@@ -41,8 +41,8 @@ if [ "$engine" = "rust" ]; then
     </dev/null >>"$LOG" 2>&1 &
   sleep 1
 else
-  if [ -x /data/local/tmp/haltee/restart-daemon.sh ]; then
-    sh /data/local/tmp/haltee/restart-daemon.sh >> "$LOG" 2>&1
+  if [ -x /data/aes67bridge/legacy/restart-daemon.sh ]; then
+    sh /data/aes67bridge/legacy/restart-daemon.sh >> "$LOG" 2>&1
   else
     echo "$(date) ERROR legacy restart-daemon.sh missing" >> "$LOG"; exit 1
   fi

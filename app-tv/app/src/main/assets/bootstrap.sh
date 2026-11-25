@@ -66,11 +66,11 @@ if [ -f "$STAGE/haltee_rtp_sender" ]; then
   mv -f "$ROOT/.aes67_rtp_sender.new" "$ROOT/aes67_rtp_sender"
 fi
 
-# 5) daemon launcher (root helper stays in /data/local/tmp/haltee)
-mkdir -p /data/local/tmp/haltee
+# 5) daemon launcher (root helper stays in /data/aes67bridge/legacy)
+mkdir -p /data/aes67bridge/legacy
 if [ -f "$STAGE/restart-daemon.sh" ]; then
-  cp -f "$STAGE/restart-daemon.sh" /data/local/tmp/haltee/restart-daemon.sh
-  chmod 755 /data/local/tmp/haltee/restart-daemon.sh
+  cp -f "$STAGE/restart-daemon.sh" /data/aes67bridge/legacy/restart-daemon.sh
+  chmod 755 /data/aes67bridge/legacy/restart-daemon.sh
 fi
 
 # 6) AES67 mode from daemon.conf (single source of truth; default = standard 20ms)
@@ -101,8 +101,8 @@ chmod 0644 "$ROOT/live.bits.meta" "$ROOT/live.meta" 2>/dev/null
 if [ "${engine:-legacy}" = "rust" ] && [ -f "$STAGE/restart.sh" ] && [ -x "$ROOT/aes67-daemon" ]; then
   echo "bootstrap: rust engine -> restart.sh"
   sh "$STAGE/restart.sh" >> "$LOG" 2>&1
-elif [ -x /data/local/tmp/haltee/restart-daemon.sh ]; then
-  sh /data/local/tmp/haltee/restart-daemon.sh >> "$LOG" 2>&1
+elif [ -x /data/aes67bridge/legacy/restart-daemon.sh ]; then
+  sh /data/aes67bridge/legacy/restart-daemon.sh >> "$LOG" 2>&1
 else
   echo "ERROR restart-daemon.sh missing" >> "$LOG"
 fi

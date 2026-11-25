@@ -13,7 +13,7 @@ echo "=== $(date) rollback ==="
 # 1) stop the C daemon (only aes67_rtp_send*; Rust aes67-daemon/aes67-feed are left alone)
 for p in $(pidof aes67_rtp_sender); do kill -9 "$p" 2>/dev/null; done
 rm -f "$ROOT/aes67_rtp_sender"
-rm -f /data/local/tmp/haltee/restart-daemon.sh
+rm -f /data/aes67bridge/legacy/restart-daemon.sh
 
 # 2) stop live/mode flags
 rm -f "$ROOT/live.enable" "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes"
