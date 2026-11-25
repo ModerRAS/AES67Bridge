@@ -14,3 +14,16 @@ Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
 构建见各目录 `build.ps1` / `cargo build`（依赖 Android SDK build-tools、NDK、rustup armv7 target；路径按本机调整）。
 
 运行时所有文件在设备单一目录 `/data/aes67bridge/`（daemon.conf、live.bits/live.pcm FIFO、aes67.sdp、status.json 等）；`aes67boot.sh` 的日志在 `/data/aes67bridge/logs/boot.log`。
+
+## License
+
+本项目采用 **GNU General Public License v3.0**（GPL-3.0）开源，全文见 [LICENSE](LICENSE)。
+
+Vendored 第三方组件保留其原始许可证：
+
+- `dolby-pipeline/vendor/truehd`、`dolby-pipeline/vendor/eac3`、`dolby-pipeline/vendor/oamd` — Apache-2.0
+- `daemon-rs/vendor/eac3` — Apache-2.0
+- `dolby-pipeline/vendor/roar` — BSD-3-Clause-Clear + Alliance for Open Media Patent License 1.0
+- `daemon-rs/vendor/nsp_aes67` — 来源与补丁见 `PATCHES.md`
+
+以上均与 GPL-3.0 兼容。
