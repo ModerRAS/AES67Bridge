@@ -46,7 +46,15 @@ class AutoStartService : Service() {
 
     private fun triggerRoot(scriptPath: String): Boolean {
         return try {
-            ProcessBuilder("/system/bin/setprop", "zidoo.root.cmd2", scriptPath).start().waitFor()
+            // The vendor bridge (zd_root_cmd.sh) deletes the file it is pointed at before
+            // running it, so trigger a disposable copy: the canonical scripts must survive
+            // in filesDir (the boot hook waits for filesDir/start.sh).
+            val src = File(scriptPath)
+            val run = File(src.parentFile, "run-" + src.name)
+            src.copyTo(run, overwrite = true)
+            run.setReadable(true, false)
+            run.setExecutable(true, false)
+            ProcessBuilder("/system/bin/setprop", "zidoo.root.cmd2", run.absolutePath).start().waitFor()
             ProcessBuilder("/system/bin/setprop", "zidoo.root.cmd.start2", "1").start().waitFor()
             true
         } catch (t: Throwable) {
