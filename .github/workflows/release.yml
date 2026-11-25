@@ -43,14 +43,18 @@ jobs:
           cp device/haltee-proxy/out/audio.primary.amlogic.so app-tv/app/src/main/assets/
 
       - name: Prepare signing material
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
         run: |
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app-tv/keystore.jks
-          printf '%s\n' "$KEYSTORE_PROPERTIES" > app-tv/keystore.properties
-          chmod 600 app-tv/keystore.jks app-tv/keystore.properties
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PROPERTIES" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > app-tv/keystore.jks
+            printf '%s\n' "$KEYSTORE_PROPERTIES" > app-tv/keystore.properties
+            chmod 600 app-tv/keystore.jks app-tv/keystore.properties
+            echo "signing material ready"
+          else
+            echo "::warning::No signing secrets configured; release will be debug-signed."
+          fi
 
       - uses: gradle/actions/setup-gradle@v4
         with:
