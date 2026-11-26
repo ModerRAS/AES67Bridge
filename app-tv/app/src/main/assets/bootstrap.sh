@@ -59,12 +59,17 @@ else
   echo "stage md5:"; md5sum "$STAGE/audio.primary.amlogic.so" "$STAGE/audio.primary.amlogic.so.orig" 2>&1
 fi
 
-# 3) mount overlay over /vendor/lib/hw, publish the stage tee through the MERGED
-#    path, and restart the HAL when the merged .so actually changed.
-#    Writing $UPPER/audio.primary.amlogic.so directly does NOT refresh the merged
-#    dentry while the overlay is mounted: /vendor/lib/hw keeps serving the old
-#    inode until the overlay is remounted (a reboot).  A hot update therefore has
-#    to go through /vendor/lib/hw/audio.primary.amlogic.so.
+# 3) mount overlay over /vendor/lib/hw, publish a CHANGED stage tee through the
+#    MERGED path, and restart the HAL only when its content changed.
+#    Two traps here, both learned the hard way:
+#    a) writing $UPPER/audio.primary.amlogic.so directly does NOT refresh the
+#       merged dentry while the overlay is mounted (the merged dir keeps serving
+#       the old inode until the overlay is remounted, i.e. until a reboot);
+#    b) copying over /vendor/lib/hw/audio.primary.amlogic.so in place truncates
+#       and rewrites the very file a running HAL has mmap()ed: its code pages
+#       change under it and the HAL dies with SIGBUS/SIGSEGV.  Replace by
+#       rename() instead (new inode, old one stays alive until the restart) and
+#       do nothing at all when the content is already identical.
 mounted=0
 if grep -q " /vendor/lib/hw overlay" /proc/mounts; then
   echo "overlay already mounted"
@@ -73,23 +78,32 @@ else
   echo "overlay mount rc=$?"
   mounted=1
 fi
-before=
-if [ -f /vendor/lib/hw/audio.primary.amlogic.so ]; then
-  before=$(md5sum /vendor/lib/hw/audio.primary.amlogic.so | cut -d' ' -f1)
-fi
-if [ -f "$STAGE/audio.primary.amlogic.so" ]; then
-  cp -f "$STAGE/audio.primary.amlogic.so" /vendor/lib/hw/audio.primary.amlogic.so
-  chmod 0755 /vendor/lib/hw/audio.primary.amlogic.so
-fi
-if [ -f "$STAGE/audio.primary.amlogic.so.orig" ]; then
-  cp -f "$STAGE/audio.primary.amlogic.so.orig" /vendor/lib/hw/audio.primary.amlogic.so.orig
-  chmod 0755 /vendor/lib/hw/audio.primary.amlogic.so.orig
-fi
-after=$(md5sum /vendor/lib/hw/audio.primary.amlogic.so 2>/dev/null | cut -d' ' -f1)
-echo "merged md5: $before -> $after"
+publish_merged() {
+  name="$1"
+  src="$STAGE/$name"
+  if [ ! -f "$src" ]; then
+    return 0
+  fi
+  smd5=$(md5sum "$src" | cut -d' ' -f1)
+  dmd5=$(md5sum "/vendor/lib/hw/$name" 2>/dev/null | cut -d' ' -f1)
+  if [ "$smd5" = "$dmd5" ]; then
+    echo "$name unchanged ($smd5)"
+    return 0
+  fi
+  cp -f "$src" "/vendor/lib/hw/.$name.new" || return 1
+  chmod 0755 "/vendor/lib/hw/.$name.new"
+  mv -f "/vendor/lib/hw/.$name.new" "/vendor/lib/hw/$name" || return 1
+  echo "$name updated: $dmd5 -> $smd5"
+  return 2
+}
+changed=0
+publish_merged audio.primary.amlogic.so
+if [ "$?" = "2" ]; then changed=1; fi
+publish_merged audio.primary.amlogic.so.orig
+if [ "$?" = "2" ]; then changed=1; fi
 echo "merged:"; ls -l /vendor/lib/hw/audio.primary.amlogic.so* 2>&1
 md5sum /vendor/lib/hw/audio.primary.amlogic.so 2>&1
-if [ "$mounted" = "1" ] || [ "$before" != "$after" ]; then
+if [ "$mounted" = "1" ] || [ "$changed" = "1" ]; then
   echo "HAL restart required (fresh mount or tee changed)"
   setprop ctl.restart vendor.audio-hal
   sleep 3

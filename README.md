@@ -8,7 +8,8 @@ Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
   - `decode=auto`（默认）是真正的双源路由器：同时探测 `live.bits`（压缩码流，优先）和 `live.pcm`（已解码 PCM），电影走 TrueHD/Atmos 对象渲染，音乐 PCM 按配置布局渲染（2.0/5.1/7.1 等经 ROAR；2.0 也可渲染到 5.1.2 目标布局，未上混的声道保持静音）；两源都安静 20 s 后释放会话回到"等待片源"；源类型切换时重建会话（约 1 s，含 PTP 单播回退时更长）。
   - 输出电平旋钮：`gain_db`（统一增益，作用在 limiter 前，负值留余量）与 `limiter_db`（ROAR 峰值限幅上限，默认 −1 dBFS）；两者都可在 GUI 设置里改，status 里能看到 `bits.out_peak`/`bits.limited`/`bits.dialnorm_db`。
   - `pt`（RTP 动态 Payload Type，默认随编码：L24=97 / L16=96）可在 GUI「输出」页设置；`sap=1`（默认开）向 224.2.127.254:9875 周期公告 SDP（AES67 发现），GUI 设置会写全配置，不会再丢键。
-  - **0.2.8**：应用内热更新修复——HAL 代理升级时改为通过 overlay 的合并路径发布，内容变化才重启 HAL（此前直接写 upper 在被挂载的 overlay 下不会刷新合并视图，升级后要重启设备才生效）。
+  - **0.2.9**：修复热更新时直接覆盖 HAL 正在 mmap 的 `.so` 会让 HAL 进程 SIGBUS/SIGSEGV 崩溃的问题——改为临时文件 + rename 原子替换；内容不变时完全不碰文件，只有内容变化才重启 HAL。
+- **0.2.8**：应用内热更新修复——HAL 代理升级时改为通过 overlay 的合并路径发布，内容变化才重启 HAL（此前直接写 upper 在被挂载的 overlay 下不会刷新合并视图，升级后要重启设备才生效）。
 - **0.2.7**：修复多声道目标布局下偶发的爆音/白噪声（HAL tee FIFO 整帧原子写 + 换流边界排空/重开 + daemon 侧排空/重同步）；live.pcm 新增系统混音回退，第三方应用（ExoPlayer/Kodi/浏览器等）的 PCM 声音也能进 AES67（DIRECT 优先，可关）。
 - **SMPTE ST 2110-30 对齐（0.2.6）**：PTP profile 可选 `aes67`（media profile，domain 0）或 `st2059-2`（ST 2059-2，默认 domain 127，announce 1 s / sync 125 ms 参数，支持 one-step 与 two-step Sync）；SDP 的 `clock-domain`/`ts-refclk:ptp=IEEE1588-2008:<GMID>:<domain>`/`mediaclk:direct=0` 自动跟随；多声道 `channel-order` 按 SMPTE2110 约定生成：2.0→(ST)、4.1.2→(ST,U05)、5.1→(51)、5.1.2→(51,U02)、7.1→(71)、7.1.2→(71,U02)、5.1.4→(51,U04)、7.1.4→(71,U04)、9.1.6→(71,U08)。**正式支持的水平是 1 ms（Level A）**；125 µs（Level B）实测在本机需自旋占一个核且仍有约 0.3% 丢包，仅作实验开关，不用于生产（设置页标注「实验」）。
 - `dolby-pipeline/`：TrueHD/EAC3 解析解码 + 对象渲染管线（vendored truehd/eac3/oamd/roar）。
