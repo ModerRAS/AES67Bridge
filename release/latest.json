@@ -1,18 +1,18 @@
 {
-  "tag": "v0.2.7",
-  "versionCode": 9,
-  "versionName": "0.2.7",
-  "publishedAt": "2026-11-26T11:45:35Z",
-  "notes": "AES67Bridge 0.2.7",
+  "tag": "v0.2.8",
+  "versionCode": 10,
+  "versionName": "0.2.8",
+  "publishedAt": "2026-11-26T11:54:00Z",
+  "notes": "AES67Bridge 0.2.8",
   "apk": {
-    "url": "https://github.com/ModerRAS/AES67Bridge/releases/download/v0.2.7/AES67Bridge-0.2.7.apk",
-    "sha256": "5656cc32d91b88040fb9e16db8ae158ba3e5d151d5fdafa70e9bd8357c18f5ef",
-    "size": 19201750
+    "url": "https://github.com/ModerRAS/AES67Bridge/releases/download/v0.2.8/AES67Bridge-0.2.8.apk",
+    "sha256": "805f746be2f647148906a8f70e4236184bcfde27017f46b880dd242b0ae39e5e",
+    "size": 19202046
   },
   "daemon": {
-    "url": "https://github.com/ModerRAS/AES67Bridge/releases/download/v0.2.7/aes67-daemon-armv7-0.2.7",
-    "sha256": "5966dace2557f805a68f6c2237162cd1e86b52047db02fd3c1868398f429c2d8",
-    "size": 3787980,
-    "version": "0.2.7"
+    "url": "https://github.com/ModerRAS/AES67Bridge/releases/download/v0.2.8/aes67-daemon-armv7-0.2.8",
+    "sha256": "780ccfbdeb3d856abee20b527c7dcb2b82b34d3731aaf47080953637e84096c4",
+    "size": 3787968,
+    "version": "0.2.8"
   }
 }
