@@ -817,6 +817,10 @@ static void haltee_bits_feed(haltee_stream* e, const void* buffer, size_t bytes)
 #define LIVE_PT          97
 #define LIVE_LOCAL_IP    "192.168.63.158"
 #define LIVE_FLAG_DIRECT 0x00000001u
+/* A different DIRECT stream may carry the real playback while the first one a
+ * player opened (preview/UI) stays idle.  Rebind only after the bound stream
+ * has been quiet this long so two streams are never interleaved in the FIFO. */
+#define LIVE_SWITCH_SILENCE_MS 200
 
 static volatile int g_live_active = 0;
 static volatile int g_live_thread_started = 0;
@@ -937,35 +941,127 @@ static int haltee_live_candidate(haltee_stream* e, int* ch_out)
     return 1;
 }
 
+/* Create/open the live PCM FIFO the way the live thread does: O_RDWR so the
+ * producer never blocks in open(), O_NONBLOCK writes, and the configured pipe
+ * size. */
+static int haltee_live_open_fifo(void)
+{
+    if (!haltee_path_exists(LIVE_FIFO)) {
+        if (mkfifo(LIVE_FIFO, 0620) != 0 && errno != EEXIST)
+            haltee_log("LIVE mkfifo failed errno=%d (%s)", errno, strerror(errno));
+    }
+    chmod(LIVE_FIFO, 0620);
+    int fd = open(LIVE_FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        haltee_log("LIVE open fifo failed errno=%d (%s)", errno, strerror(errno));
+        return -1;
+    }
+#ifdef F_SETPIPE_SZ
+    int want = 32768;
+    FILE* pf = fopen(FIFO_PIPE_BYTES, "r");
+    if (pf) {
+        int v = 0;
+        if (fscanf(pf, "%d", &v) == 1 && v >= 4096 && v <= 32768) want = v;
+        fclose(pf);
+    }
+    if (fcntl(fd, F_SETPIPE_SZ, want) < 0)
+        haltee_log("LIVE F_SETPIPE_SZ(%d) failed errno=%d", want, errno);
+#endif
+    return fd;
+}
+
+/* Discard PCM still queued for the previous stream (stale audio the daemon
+ * would otherwise decode with the new stream's frame size / rate). */
+static void haltee_live_drain_fifo(int fd)
+{
+    char buf[4096];
+    for (int i = 0; i < 64; i++) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+    }
+}
+
+static void haltee_live_bind(haltee_stream* e, int ch)
+{
+    /* Start the new stream on a clean FIFO boundary: drop the old stream's
+     * queued bytes, close the writer (the daemon sees EOF, discards a partial
+     * frame) and reopen before the first new byte.  This keeps the byte stream
+     * frame-aligned across format/rate changes. */
+    int old = (int)g_live_fd;
+    if (old >= 0) {
+        haltee_live_drain_fifo(old);
+        close(old);
+        g_live_fd = -1;
+    }
+    g_live_fd = haltee_live_open_fifo();
+    g_live_stream = (void*)e;
+    g_live_stream_id = (unsigned int)e->idx;
+    g_live_fmt = e->format;
+    haltee_log("LIVE BIND idx=%d stream=%p fmt=0x%08x(%s) rate=%u ch=%d frame_bytes=%d flags=0x%x fifo_fd=%d",
+               e->idx, (void*)e, e->format, haltee_fmt_name(e->format), e->rate, ch,
+               ch * haltee_pcm_sample_bytes(e->format), e->flags, (int)g_live_fd);
+    /* Publish the stream identity BEFORE its first PCM byte reaches the FIFO.
+     * Writing meta on stream open made the daemon switch frame size while bytes
+     * of the previous stream were still queued; the rest of the stream then
+     * decoded byte-shifted (audible noise). */
+    haltee_live_write_meta_ex((unsigned int)e->idx, e->format, e->rate, (unsigned int)ch);
+}
+
 /* called from the audio writer thread: O_NONBLOCK write, drop on full, never block */
 static void haltee_live_feed(haltee_stream* e, const void* buffer, size_t bytes)
 {
     if (!g_live_active || !buffer || bytes == 0) return;
     int ch = 0;
     if (!haltee_live_candidate(e, &ch)) return;
+    if (!(e->flags & LIVE_FLAG_DIRECT)) return; /* official player DIRECT path */
+    unsigned long long now = haltee_mono_ms();
     if (!g_live_stream) {
-        if (!(e->flags & LIVE_FLAG_DIRECT)) return; /* official player DIRECT path */
-        g_live_stream = (void*)e;
-        g_live_stream_id = (unsigned int)e->idx;
-        g_live_fmt = e->format;
-        haltee_log("LIVE BIND idx=%d stream=%p fmt=0x%08x(%s) rate=%u ch=%d frame_bytes=%d flags=0x%x",
-                   e->idx, (void*)e, e->format, haltee_fmt_name(e->format), e->rate, ch,
-                   ch * haltee_pcm_sample_bytes(e->format), e->flags);
+        haltee_live_bind(e, ch);
     } else if (g_live_stream != (void*)e) {
-        return;
+        if (now - g_live_last_write_ms <= LIVE_SWITCH_SILENCE_MS) return;
+        haltee_log("LIVE rebind idx=%d (previous idx=%u quiet for %llu ms)",
+                   e->idx, g_live_stream_id, now - g_live_last_write_ms);
+        haltee_live_bind(e, ch);
     }
-    g_live_last_write_ms = haltee_mono_ms();
+    g_live_last_write_ms = now;
     int fd = (int)g_live_fd;
     if (fd < 0) return;
-    ssize_t w = write(fd, buffer, bytes);
-    if (w < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            __atomic_add_fetch(&g_live_dropped, (unsigned long long)bytes, __ATOMIC_RELAXED);
-        return;
+    int sample_bytes = haltee_pcm_sample_bytes(e->format);
+    if (sample_bytes <= 0) return;
+    size_t frame_bytes = (size_t)ch * (size_t)sample_bytes;
+    size_t total = bytes - (bytes % frame_bytes);
+    if (total < bytes)
+        __atomic_add_fetch(&g_live_dropped, (unsigned long long)(bytes - total), __ATOMIC_RELAXED);
+    /* Whole frames only, in <=PIPE_BUF chunks: an O_NONBLOCK pipe write of at
+     * most PIPE_BUF bytes is atomic (all bytes or EAGAIN), so FIFO pressure can
+     * only drop whole frames.  A partial write used to shift every following
+     * frame; the daemon then decoded byte-shifted garbage until the stream
+     * identity changed (heard as loud noise/pops with multichannel targets,
+     * where the extra render+send work makes the reader fall behind). */
+    const size_t pipe_atomic = 4096;
+    size_t chunk = (pipe_atomic / frame_bytes) * frame_bytes;
+    if (chunk == 0) chunk = frame_bytes;
+    size_t off = 0;
+    while (off < total) {
+        size_t n = total - off < chunk ? total - off : chunk;
+        ssize_t w = write(fd, (const char*)buffer + off, n);
+        if (w < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                __atomic_add_fetch(&g_live_dropped, (unsigned long long)(total - off), __ATOMIC_RELAXED);
+            return;
+        }
+        if (w == 0) return;
+        if ((size_t)w != n) {
+            size_t whole = ((size_t)w / frame_bytes) * frame_bytes;
+            __atomic_add_fetch(&g_live_bytes, (unsigned long long)whole, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_live_dropped, (unsigned long long)(total - off - whole), __ATOMIC_RELAXED);
+            haltee_log("LIVE PARTIAL idx=%d wrote=%zd chunk=%zu frame_bytes=%zu (FIFO alignment risk)",
+                       e->idx, w, n, frame_bytes);
+            return;
+        }
+        __atomic_add_fetch(&g_live_bytes, (unsigned long long)n, __ATOMIC_RELAXED);
+        off += n;
     }
-    __atomic_add_fetch(&g_live_bytes, (unsigned long long)w, __ATOMIC_RELAXED);
-    if ((size_t)w < bytes)
-        __atomic_add_fetch(&g_live_dropped, (unsigned long long)(bytes - (size_t)w), __ATOMIC_RELAXED);
 }
 
 static void* haltee_live_thread(void* arg)
@@ -990,25 +1086,7 @@ static void* haltee_live_thread(void* arg)
         }
         int want = haltee_file_exists(LIVE_ENABLE_FILE);
         if (want && !g_live_active) {
-            if (!haltee_path_exists(LIVE_FIFO)) {
-                if (mkfifo(LIVE_FIFO, 0620) != 0 && errno != EEXIST)
-                    haltee_log("LIVE mkfifo failed errno=%d (%s)", errno, strerror(errno));
-            }
-            chmod(LIVE_FIFO, 0620);
-            int fd = open(LIVE_FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-            if (fd >= 0) {
-#ifdef F_SETPIPE_SZ
-                int want = 32768;
-                FILE* pf = fopen(FIFO_PIPE_BYTES, "r");
-                if (pf) {
-                    int v = 0;
-                    if (fscanf(pf, "%d", &v) == 1 && v >= 4096 && v <= 32768) want = v;
-                    fclose(pf);
-                }
-                if (fcntl(fd, F_SETPIPE_SZ, want) < 0)
-                    haltee_log("LIVE F_SETPIPE_SZ(%d) failed errno=%d", want, errno);
-#endif
-            }
+            int fd = haltee_live_open_fifo();
             if (fd < 0) {
                 static unsigned long long last_fail = 0;
                 if (now - last_fail >= 2000) {
@@ -1216,9 +1294,12 @@ static void haltee_wrap_stream(void* stream, struct haltee_config* cfg, uint32_t
     }
     {
         int meta_ch = 0;
-        if (g_live_active && haltee_live_candidate(e, &meta_ch)) {
+        /* Only refresh meta for the stream that currently owns the FIFO.  A
+         * freshly opened stream publishes its meta from haltee_live_bind() on
+         * its first write, i.e. when it really starts feeding the FIFO. */
+        if (g_live_active && (void*)e == g_live_stream && haltee_live_candidate(e, &meta_ch)) {
             haltee_live_write_meta_ex((unsigned int)e->idx, e->format, e->rate, (unsigned int)meta_ch);
-            haltee_log("LIVE meta updated on open idx=%d fmt=0x%08x(%s) rate=%u ch=%d frame_bytes=%d",
+            haltee_log("LIVE meta refreshed on bound stream open idx=%d fmt=0x%08x(%s) rate=%u ch=%d frame_bytes=%d",
                        e->idx, e->format, haltee_fmt_name(e->format), e->rate, meta_ch,
                        meta_ch * haltee_pcm_sample_bytes(e->format));
         }

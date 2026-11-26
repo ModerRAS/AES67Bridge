@@ -79,7 +79,10 @@ if [ "$hal_buf" = "5" ]; then
   echo 8192 > "$ROOT/fifo.pipe_bytes"
   echo lowlat > "$ROOT/mode.txt"
 else
-  rm -f "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes" 2>/dev/null
+  rm -f "$ROOT/latency.frames" 2>/dev/null
+  pipe_bytes=$((fifo_kb * 1024))
+  [ "$pipe_bytes" -ge 4096 ] && [ "$pipe_bytes" -le 32768 ] || pipe_bytes=32768
+  echo "$pipe_bytes" > "$ROOT/fifo.pipe_bytes"
   echo normal > "$ROOT/mode.txt"
 fi
 if [ "$pcm_export" = "1" ] || [ "$bits_export" = "1" ]; then

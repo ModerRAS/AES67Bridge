@@ -28,7 +28,13 @@ if [ "$hal_buf" = "5" ]; then
   echo 8192 > "$ROOT/fifo.pipe_bytes"
   echo lowlat > "$ROOT/mode.txt"
 else
-  rm -f "$ROOT/latency.frames" "$ROOT/fifo.pipe_bytes"
+  rm -f "$ROOT/latency.frames"
+  # FIFO depth from the UI (8/16/32 KB).  The HAL tee applies it whenever it
+  # (re)opens the PCM FIFO, so a stream switch picks a new value up without a
+  # HAL restart.  Clamp to the tee's accepted range.
+  pipe_bytes=$((fifo_kb * 1024))
+  [ "$pipe_bytes" -ge 4096 ] && [ "$pipe_bytes" -le 32768 ] || pipe_bytes=32768
+  echo "$pipe_bytes" > "$ROOT/fifo.pipe_bytes"
   echo normal > "$ROOT/mode.txt"
 fi
 chown root:root "$ROOT/mode.txt" 2>/dev/null

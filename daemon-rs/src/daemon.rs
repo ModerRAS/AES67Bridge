@@ -490,6 +490,8 @@ impl Daemon {
         let mut fifo_max = 0usize;
         let mut maxch_warned = false;
         let mut fmt_warned = false;
+        let mut resync_warned = false;
+        let mut resyncs: u64 = 0;
         let mut submit_warned = false;
         let mut pcm_render_warned = false;
         let start_ns = platform::now_ns();
@@ -515,7 +517,10 @@ impl Daemon {
                 if cfg.seconds > 0.0 && (now - start_ns) as f64 / 1e9 >= cfg.seconds {
                     break;
                 }
-                if now - last_meta_ns > 250_000_000 {
+                // 20 ms: a stream/format switch publishes live.meta *before* its
+                // first byte; a long poll interval would decode those bytes with
+                // the previous frame size (a short burst of noise).
+                if now - last_meta_ns > 20_000_000 {
                     meta::parse_meta(&cfg.meta, &mut meta);
                     last_meta_ns = platform::now_ns();
                 }
@@ -644,6 +649,13 @@ impl Daemon {
                     if let Some(stage) = render_stage.as_mut() {
                         stage.reset();
                     }
+                    let stale = drain_source(&mut source);
+                    if stale > 0 {
+                        logln!(
+                            "PCM session rebuilt: discarded {} stale FIFO byte(s) (new stream/format starts clean)",
+                            stale
+                        );
+                    }
                     carry.clear();
                     meter.reset();
                     current = StreamShape {
@@ -660,6 +672,13 @@ impl Daemon {
                     // stream identity (SSRC/SDP) stays valid.
                     logln!("META fmt={} (frames re-aligned, stream kept)", fmt.name());
                     current.fmt = fmt;
+                    let stale = drain_source(&mut source);
+                    if stale > 0 {
+                        logln!(
+                            "PCM format change: discarded {} stale FIFO byte(s) so the new frame size starts clean",
+                            stale
+                        );
+                    }
                     carry.clear();
                     resampler.reset();
                 }
@@ -711,8 +730,40 @@ impl Daemon {
                         carry.clear();
                     }
                 }
+                if read == 0 && !carry.is_empty() {
+                    // No new bytes while a partial frame is still buffered: the
+                    // leftover can only come from an upstream mid-frame drop
+                    // (the HAL tee used to write partial frames when its FIFO
+                    // filled).  Drop it so the next write starts a fresh frame
+                    // instead of decoding this stream byte-shifted forever.
+                    let gap_ns = platform::now_ns() - last_data_ns;
+                    if gap_ns > 100_000_000 {
+                        let leftover = carry.len();
+                        carry.clear();
+                        resyncs += 1;
+                        if !resync_warned {
+                            resync_warned = true;
+                            logln!(
+                                "WARN PCM resync: dropped {} leftover byte(s) after {:.0} ms without data (upstream frame damage; stream continues from the next frame)",
+                                leftover,
+                                gap_ns as f64 / 1e6
+                            );
+                        }
+                    }
+                }
                 if eof {
                     eofs += 1;
+                    if !carry.is_empty() {
+                        // The HAL tee closes the FIFO writer on every stream
+                        // switch (and drains stale bytes first), so a partial
+                        // frame here belongs to the old stream: drop it and let
+                        // the new stream start frame-aligned.
+                        logln!(
+                            "PCM stream boundary: dropped {} buffered byte(s) at FIFO EOF",
+                            carry.len()
+                        );
+                        carry.clear();
+                    }
                     flush_frames(
                         source_channels,
                         resampler.as_mut(),
@@ -771,7 +822,7 @@ impl Daemon {
                     last_stat_ns = now;
                     let counters = active.counters();
                     logln!(
-                        "STAT packets={} bytes={} send_err={} drops={} silent={} late={} read_bytes={} reads={} eofs={} ring_fill={} fifo_bytes={} fifo_max={} ch={} rate={} rs_in={} rs_out={} flows={} locked={} pcm_render={} render_blocks={} limited={} peak={:.3}",
+                        "STAT packets={} bytes={} send_err={} drops={} silent={} late={} read_bytes={} reads={} eofs={} ring_fill={} fifo_bytes={} fifo_max={} ch={} rate={} rs_in={} rs_out={} flows={} locked={} pcm_render={} render_blocks={} limited={} peak={:.3} resyncs={}",
                         counters.packets,
                         counters.bytes,
                         counters.errors,
@@ -793,7 +844,8 @@ impl Daemon {
                         u8::from(render_stage.is_some()),
                         render_stage.as_ref().map_or(0, |stage| stage.rendered_blocks),
                         render_stage.as_ref().map_or(0, |stage| stage.limited),
-                        render_stage.as_ref().map_or(0.0, |stage| stage.peak)
+                        render_stage.as_ref().map_or(0.0, |stage| stage.peak),
+                        resyncs
                     );
                 }
                 if read == 0 && !eof {
@@ -2119,6 +2171,30 @@ fn flush_frames(
     }
 }
 
+/// Discard whatever the producer already wrote into the FIFO.  Called when the
+/// engine (re)builds a session: the bytes queued while the build/PTT lock was
+/// running are stale (and may belong to the previous stream identity), so
+/// keeping them would splice old audio -- or, when the format changed, decode a
+/// byte-shifted stream.  The producer writes whole frames, so the next byte
+/// after the drain starts on a fresh frame boundary.
+fn drain_source(source: &mut source::Source) -> usize {
+    let mut sink: Vec<u8> = Vec::with_capacity(65_536);
+    let mut total = 0usize;
+    for _ in 0..8 {
+        sink.clear();
+        match source.read_available(&mut sink) {
+            Ok((n, _)) if n > 0 => {
+                total += n;
+                if total >= 512 * 1024 {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    total
+}
+
 /// Pick the PCM layout plan: ROAR rendering when a target layout is configured and both layouts
 /// are ROAR-supported (channel-based element with the real source layout), otherwise the legacy
 /// strict intersection (no downmix, drop extra source channels).
@@ -2988,4 +3064,44 @@ mod pcm_render_tests {
         assert!(stage.is_none());
     }
 }
+
+#[cfg(test)]
+mod source_drain_tests {
+    use super::drain_source;
+
+    /// After a session/format rebuild the queued FIFO bytes are stale. Draining
+    /// must remove everything currently appended so the next byte the engine
+    /// decodes is the producer's next whole frame (alignment is preserved).
+    #[test]
+    fn drain_source_discards_everything_appended_after_open() {
+        let path = std::env::temp_dir().join(format!(
+            "aes67-drain-{}-{}.pcm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, b"").unwrap();
+        let mut source = crate::source::open(path.to_str().unwrap()).unwrap();
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&[0x5a_u8; 4096]).unwrap();
+            file.flush().unwrap();
+        }
+        for _ in 0..500 {
+            if source.available() >= 4096 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(source.available(), 4096);
+        assert_eq!(drain_source(&mut source), 4096);
+        assert_eq!(source.available(), 0);
+        assert_eq!(drain_source(&mut source), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 
