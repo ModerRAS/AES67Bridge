@@ -8,6 +8,7 @@
 //!   aes67-ctl mute on|off          mute / unmute
 //!   aes67-ctl toggle-mute
 //!   aes67-ctl watch                print every state change (Ctrl-C to stop)
+//!   aes67-ctl status               print one status snapshot from @aes67bridge.status
 
 #[cfg(unix)]
 fn main() {
@@ -47,6 +48,20 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("status") {
+        use std::io::Read as _;
+        let mut stream = match connect_abstract("aes67bridge.status") {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("connect @aes67bridge.status: {err}");
+                std::process::exit(1);
+            }
+        };
+        let mut body = String::new();
+        let _ = stream.read_to_string(&mut body);
+        print!("{body}");
+        return;
+    }
     let command = match args.first().map(String::as_str) {
         None | Some("get") => "{\"cmd\":\"get\"}".to_string(),
         Some("set") => match args.get(1).and_then(|v| v.parse::<f32>().ok()) {
