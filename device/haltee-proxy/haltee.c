@@ -798,9 +798,11 @@ static void haltee_bits_feed(haltee_stream* e, const void* buffer, size_t bytes)
 /* ---------------- live PCM export for the AES67 sender (PoC-2) ----------------
  * The HAL process runs as uid audioserver; Android netd blocks AF_INET socket
  * creation for this uid (socket() -> EPERM), so RTP is NOT sent from here.
- * This proxy instead exports the official player's 48 kHz / 2 ch PCM,
- * unchanged (AUDIO_FORMAT_PCM_16_BIT or PCM_24_BIT_PACKED, bytes as-is) into
- * the FIFO /data/aes67bridge/live.pcm.  A root-side AES67 daemon reads the FIFO,
+ * This proxy instead exports 48 kHz / 2 ch PCM, unchanged (AUDIO_FORMAT_PCM_16_BIT
+ * or PCM_24_BIT_PACKED, bytes as-is) into the FIFO /data/aes67bridge/live.pcm.
+ * The vendor player's DIRECT streams are preferred (bit-exact); when no DIRECT
+ * stream is writing, the PRIMARY system mixer is exported instead so audio from
+ * third-party apps (ExoPlayer / Kodi / browsers) reaches AES67 too.  A root-side AES67 daemon reads the FIFO,
  * converts to L24 and sends RTP (PT 97, 1 ms packets) to 239.69.2.1:5004.
  *
  * Enabled by /data/aes67bridge/live.enable.  The audio writer thread opens nothing
@@ -817,9 +819,17 @@ static void haltee_bits_feed(haltee_stream* e, const void* buffer, size_t bytes)
 #define LIVE_PT          97
 #define LIVE_LOCAL_IP    "192.168.63.158"
 #define LIVE_FLAG_DIRECT 0x00000001u
-/* A different DIRECT stream may carry the real playback while the first one a
- * player opened (preview/UI) stays idle.  Rebind only after the bound stream
- * has been quiet this long so two streams are never interleaved in the FIFO. */
+#define LIVE_FLAG_PRIMARY 0x00000002u
+/* Opt-out for the system-mixer capture: while this file exists only DIRECT
+ * streams are exported (original behaviour).  Absent (default) = the PRIMARY
+ * mixer output is exported whenever no DIRECT stream is writing, so audio from
+ * third-party apps (AUDIO_OUTPUT_FLAG_PRIMARY: ExoPlayer/Kodi/browsers) reaches
+ * AES67 too.  The mixer is post-mix and post-volume, so it carries system
+ * sounds and follows the Android volume setting. */
+#define LIVE_MIXER_DISABLE_FILE "/data/aes67bridge/live.mixer.disable"
+/* A different stream may carry the real playback while the bound one
+ * (preview/UI/mixer notification) stays idle.  Rebind only after the bound
+ * stream has been quiet this long so two streams are never interleaved. */
 #define LIVE_SWITCH_SILENCE_MS 200
 
 static volatile int g_live_active = 0;
@@ -831,6 +841,8 @@ static volatile unsigned int g_live_stream_id = 0xffffffffu;
 static volatile unsigned int g_live_fmt = 0;
 static volatile unsigned long long g_live_bytes = 0;
 static volatile unsigned long long g_live_dropped = 0;
+static volatile unsigned int g_live_stream_flags = 0;
+static volatile int g_live_mixer_ok = 1;
 
 static unsigned long long haltee_mono_ms(void)
 {
@@ -866,7 +878,7 @@ static void haltee_live_write_sdp(void)
         "v=0\r\n"
         "o=- %u 0 IN IP4 " LIVE_LOCAL_IP "\r\n"
         "s=HALTEE Z9X AES67 Sender\r\n"
-        "i=official player DIRECT PCM exported by vendor audio HAL tee (FIFO)\r\n"
+        "i=DIRECT (bit-exact) or system-mixer PCM exported by vendor audio HAL tee (FIFO)\r\n"
         "c=IN IP4 " LIVE_GROUP "/32\r\n"
         "t=0 0\r\n"
         "m=audio %d RTP/AVP %d\r\n"
@@ -941,6 +953,16 @@ static int haltee_live_candidate(haltee_stream* e, int* ch_out)
     return 1;
 }
 
+/* DIRECT (official player, bit-exact) wins; the PRIMARY system mixer is the
+ * fallback for third-party apps.  Never export both at once: the mixer must
+ * not steal an active DIRECT stream, and DIRECT takes over immediately. */
+static int haltee_live_allowed(haltee_stream* e)
+{
+    if (e->flags & LIVE_FLAG_DIRECT) return 1;
+    if (!g_live_mixer_ok) return 0;
+    return (e->flags & LIVE_FLAG_PRIMARY) ? 1 : 0;
+}
+
 /* Create/open the live PCM FIFO the way the live thread does: O_RDWR so the
  * producer never blocks in open(), O_NONBLOCK writes, and the configured pipe
  * size. */
@@ -995,6 +1017,7 @@ static void haltee_live_bind(haltee_stream* e, int ch)
     }
     g_live_fd = haltee_live_open_fifo();
     g_live_stream = (void*)e;
+    g_live_stream_flags = e->flags;
     g_live_stream_id = (unsigned int)e->idx;
     g_live_fmt = e->format;
     haltee_log("LIVE BIND idx=%d stream=%p fmt=0x%08x(%s) rate=%u ch=%d frame_bytes=%d flags=0x%x fifo_fd=%d",
@@ -1013,14 +1036,21 @@ static void haltee_live_feed(haltee_stream* e, const void* buffer, size_t bytes)
     if (!g_live_active || !buffer || bytes == 0) return;
     int ch = 0;
     if (!haltee_live_candidate(e, &ch)) return;
-    if (!(e->flags & LIVE_FLAG_DIRECT)) return; /* official player DIRECT path */
+    if (!haltee_live_allowed(e)) return;
     unsigned long long now = haltee_mono_ms();
     if (!g_live_stream) {
         haltee_live_bind(e, ch);
     } else if (g_live_stream != (void*)e) {
-        if (now - g_live_last_write_ms <= LIVE_SWITCH_SILENCE_MS) return;
-        haltee_log("LIVE rebind idx=%d (previous idx=%u quiet for %llu ms)",
-                   e->idx, g_live_stream_id, now - g_live_last_write_ms);
+        int cur_direct = (g_live_stream_flags & LIVE_FLAG_DIRECT) ? 1 : 0;
+        int new_direct = (e->flags & LIVE_FLAG_DIRECT) ? 1 : 0;
+        unsigned long long quiet = now - g_live_last_write_ms;
+        /* Never let the mixer steal an active DIRECT stream; when DIRECT comes
+         * back it takes over immediately (bit-exact source wins).  Switching
+         * between two streams of the same class waits for silence. */
+        if (cur_direct && !new_direct && quiet <= LIVE_SWITCH_SILENCE_MS) return;
+        if (!(!cur_direct && new_direct) && quiet <= LIVE_SWITCH_SILENCE_MS) return;
+        haltee_log("LIVE rebind idx=%d fmt=0x%08x flags=0x%x (previous idx=%u fmt=0x%08x quiet for %llu ms)",
+                   e->idx, e->format, e->flags, g_live_stream_id, g_live_fmt, quiet);
         haltee_live_bind(e, ch);
     }
     g_live_last_write_ms = now;
@@ -1084,6 +1114,19 @@ static void* haltee_live_thread(void* arg)
             if (g_timing_active && g_timing_count >= TIMING_WINDOW)
                 haltee_timing_dump("window-full");
         }
+        {
+            int mixer_ok = !haltee_file_exists(LIVE_MIXER_DISABLE_FILE);
+            if (mixer_ok != g_live_mixer_ok) {
+                g_live_mixer_ok = mixer_ok;
+                haltee_log("LIVE mixer capture %s (%s)", mixer_ok ? "enabled" : "disabled",
+                           LIVE_MIXER_DISABLE_FILE);
+            }
+            if (!g_live_mixer_ok && g_live_stream &&
+                !(g_live_stream_flags & LIVE_FLAG_DIRECT)) {
+                haltee_log("LIVE unbind mixer stream=%p (mixer capture disabled)", (void*)g_live_stream);
+                g_live_stream = 0;
+            }
+        }
         int want = haltee_file_exists(LIVE_ENABLE_FILE);
         if (want && !g_live_active) {
             int fd = haltee_live_open_fifo();
@@ -1099,6 +1142,7 @@ static void* haltee_live_thread(void* arg)
             g_live_bytes = 0;
             g_live_dropped = 0;
             g_live_stream = 0;
+            g_live_stream_flags = 0;
             g_live_stream_id = 0xffffffffu;
             g_live_active = 1;
             haltee_live_write_sdp();
@@ -1127,15 +1171,17 @@ static void* haltee_live_thread(void* arg)
                 }
             }
 #ifdef F_GETPIPE_SZ
-            haltee_log("LIVE ENABLED fifo=%s sdp=%s pipe_sz=%d bytes (PCM as-is; rate 44100/48000, ch 2..8 per chmask; root daemon -> RTP PT%d %s:%d)",
-                       LIVE_FIFO, LIVE_SDP, (int)fcntl(fd, F_GETPIPE_SZ), LIVE_PT, LIVE_GROUP, LIVE_PORT);
+            haltee_log("LIVE ENABLED fifo=%s sdp=%s pipe_sz=%d bytes (PCM as-is; rate 44100/48000, ch 2..8; DIRECT preferred, system mixer fallback unless %s exists; root daemon -> RTP PT%d %s:%d)",
+                       LIVE_FIFO, LIVE_SDP, (int)fcntl(fd, F_GETPIPE_SZ), LIVE_MIXER_DISABLE_FILE,
+                       LIVE_PT, LIVE_GROUP, LIVE_PORT);
 #else
-            haltee_log("LIVE ENABLED fifo=%s sdp=%s (PCM as-is; rate 44100/48000, ch 2..8 per chmask; root daemon -> RTP PT%d %s:%d)",
-                       LIVE_FIFO, LIVE_SDP, LIVE_PT, LIVE_GROUP, LIVE_PORT);
+            haltee_log("LIVE ENABLED fifo=%s sdp=%s (PCM as-is; rate 44100/48000, ch 2..8; DIRECT preferred, system mixer fallback unless %s exists; root daemon -> RTP PT%d %s:%d)",
+                       LIVE_FIFO, LIVE_SDP, LIVE_MIXER_DISABLE_FILE, LIVE_PT, LIVE_GROUP, LIVE_PORT);
 #endif
         } else if (!want && g_live_active) {
             g_live_active = 0;
             g_live_stream = 0;
+            g_live_stream_flags = 0;
             int fd = (int)g_live_fd;
             g_live_fd = -1;
             if (fd >= 0) close(fd);
