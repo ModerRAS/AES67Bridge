@@ -307,6 +307,12 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     var gmDomain by remember { mutableStateOf("") }
     var adbConfirm by remember { mutableStateOf(false) }
     var toolResult by remember { mutableStateOf(readToolResult(ctx)) }
+    var osdStyle by remember {
+        mutableStateOf(
+            ctx.getSharedPreferences("aes67bridge", android.content.Context.MODE_PRIVATE)
+                .getString("osd_style", "bar") ?: "bar"
+        )
+    }
 
     Dialog(
         onDismissRequest = {
@@ -473,6 +479,19 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     }
                                 }
                                 Hint("在渲染/限幅之前统一加减：负值留余量，正值由 limiter 兜底（+ 过多会听到限幅泵动）")
+                                RowLabel("音量条") {
+                                    OptChip("横条", selected = osdStyle == "bar") {
+                                        osdStyle = "bar"
+                                        ctx.getSharedPreferences("aes67bridge", android.content.Context.MODE_PRIVATE)
+                                            .edit().putString("osd_style", "bar").apply()
+                                    }
+                                    OptChip("数字", selected = osdStyle == "numeric") {
+                                        osdStyle = "numeric"
+                                        ctx.getSharedPreferences("aes67bridge", android.content.Context.MODE_PRIVATE)
+                                            .edit().putString("osd_style", "numeric").apply()
+                                    }
+                                }
+                                Hint("遥控器音量键在屏幕上的显示样式：横条（类系统）或纯数字 −dB；只显示 AES67 电平，不改变系统音量")
                                 RowLabel("限幅上限") {
                                     listOf(-1, -3, -6, -12).forEach { db ->
                                         OptChip(

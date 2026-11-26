@@ -78,6 +78,10 @@ fi
 sh "$STAGE/bootstrap.sh" "$STAGE"
 sh "$STAGE/apply-config.sh"
 
+# Volume OSD: allow the overlay and start the foreground service (idempotent).
+appops set dev.aes67bridge.tv SYSTEM_ALERT_WINDOW allow 2>/dev/null
+am start-foreground-service -n dev.aes67bridge.tv/.VolumeOsdService 2>/dev/null
+
 echo running > "$ROOT/state.txt"
 chown root:root "$ROOT/state.txt" 2>/dev/null
 chmod 0644 "$ROOT/state.txt"

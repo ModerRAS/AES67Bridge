@@ -9,5 +9,6 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         Log.i("AES67Bridge", "boot: " + (intent?.action ?: ""))
         context.startForegroundService(Intent(context, AutoStartService::class.java).setAction("ENABLE"))
+        VolumeOsdService.request(context)
     }
 }

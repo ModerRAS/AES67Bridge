@@ -29,6 +29,8 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Volume bar: follow the daemon's last-stage trim while the user is anywhere.
+        VolumeOsdService.request(this)
         // Auto-update: at most once per 6 h; installs through the firmware root bridge when a
         // newer release is published (release/latest.json). Never blocks the UI.
         lifecycleScope.launch {
