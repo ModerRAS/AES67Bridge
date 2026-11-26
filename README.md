@@ -2,6 +2,7 @@
 
 Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
 
+- 采样率转换：默认 `resampler=c-poly`（C daemon 的 160 相 × 287 抽头 Q30 多相 FIR，44.1k→48k 实测干净）；`resampler=rubato` 仍可选但 2026-11-26 有 live 44.1k 白噪报告，选择时守护会打 WARN。
 - `app-tv/`：Android TV 控制台（Kotlin + Compose for TV，`dev.aes67bridge.tv`）：GUI 启动/停止、AES67 参数、布局/延迟/时钟设置、状态与电平。
 - `daemon-rs/`：root 侧 Rust 守护（HAL tee bits → TrueHD/EAC3 解码 → ROAR 渲染 → AES67 组播，L24/PT97，支持 8+4 双流）。运行行为：
   - `decode=auto`（默认）是真正的双源路由器：同时探测 `live.bits`（压缩码流，优先）和 `live.pcm`（已解码 PCM），电影走 TrueHD/Atmos 对象渲染，音乐 PCM 按配置布局渲染（2.0/5.1/7.1 等经 ROAR；2.0 也可渲染到 5.1.2 目标布局，未上混的声道保持静音）；两源都安静 20 s 后释放会话回到"等待片源"；源类型切换时重建会话（约 1 s，含 PTP 单播回退时更长）。

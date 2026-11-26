@@ -50,6 +50,14 @@ Linux/macOS/CI: `device/haltee-proxy/build.sh` (honours `ANDROID_NDK_HOME` /
 `ANDROID_NDK_ROOT` / `ANDROID_HOME`). For the 2026-11-25 deployed proxy the
 Windows rebuild is byte-identical: `69e25abad4af7cbebdaafbe3ff37526e` (75,324 B).
 
+## 2.1 Resampler (44.1 kHz input)
+
+`daemon.conf resampler=` selects the 44.1k→48k converter: `c-poly` (default since 0.2.4,
+the C daemon's polyphase FIR, live-verified clean) or `rubato` (sinc; an open
+white-noise report on the live 44.1k path exists, the daemon logs a WARN when
+selected). The offline harness `aes67-dump-src in.raw out.raw 2 44100 rubato` can
+be run on the device to compare both converters without starting a session.
+
 ## 3. Android TV app
 
 The app bundles runtime blobs as assets. Neither the proxy nor the stock HAL is

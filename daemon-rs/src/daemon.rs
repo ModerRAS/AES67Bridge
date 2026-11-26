@@ -161,6 +161,9 @@ impl Daemon {
         let local_ip = cfg
             .local_ip
             .unwrap_or_else(|| platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED));
+        if cfg.resampler == crate::config::ResamplerKind::Rubato {
+            logln!("WARN resampler=rubato selected; the 44.1k rubato path has an open white-noise report, c-poly is the tested/default resampler");
+        }
         let encoding = if cfg.encoding == Encoding::L24 {
             RtpEncoding::L24
         } else {
