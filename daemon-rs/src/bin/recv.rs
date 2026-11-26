@@ -371,9 +371,11 @@ fn main() {
                     i32::from(raw) << 8
                 }
                 Encoding::L24 => {
-                    let raw = i32::from(frame[c * 3])
+                    // RFC 3190 section 4: the 24-bit samples are packed
+                    // most-significant octet first (network byte order).
+                    let raw = (i32::from(frame[c * 3]) << 16)
                         | (i32::from(frame[c * 3 + 1]) << 8)
-                        | (i32::from(frame[c * 3 + 2]) << 16);
+                        | i32::from(frame[c * 3 + 2]);
                     if raw & 0x0080_0000 != 0 {
                         raw | !0x00ff_ffff
                     } else {
