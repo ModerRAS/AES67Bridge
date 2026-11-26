@@ -514,8 +514,8 @@ private fun SettingsDialog(
                                     Chip("B 239.69.68.1:5068", get("group", "239.69.67.1") == "239.69.68.1") { vals["group"] = "239.69.68.1"; vals["port"] = "5068" }
                                 }
                                 SetRow("ptime") {
-                                    listOf(125, 250, 500, 1000).forEach { us ->
-                                        Chip(us.toString() + "us", get("ptime_us", "1000") == us.toString()) { vals["ptime_us"] = us.toString() }
+                                    listOf(125, 250, 500, 1000, 2000, 4000).forEach { us ->
+                                        Chip(if (us >= 2000) (us / 1000).toString() + "ms" else us.toString() + "us", get("ptime_us", "1000") == us.toString()) { vals["ptime_us"] = us.toString() }
                                     }
                                 }
                                 SetRow("编码") {

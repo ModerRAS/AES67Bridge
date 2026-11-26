@@ -447,7 +447,11 @@ impl Network {
         let spin_ns = if slot_period <= 250_000 {
             slot_period
         } else {
-            (slot_period / 8).clamp(1, 500_000)
+            // Long packet times do not need a full eighth of the slot in a
+            // spin: 250 us covers the measured Z9X wake-up latency, and
+            // keeping the spin fraction low is what makes 2/4 ms cheaper on
+            // the CPU than 1 ms (at 1 ms this clamp keeps the original 125 us).
+            (slot_period / 8).clamp(1, 250_000)
         };
         let mut next_log = 0;
         let mut deadline = Instant::now() + run.config.lock_timeout;

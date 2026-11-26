@@ -382,16 +382,21 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                 }
                                 Hint("当前 " + get("group") + ":" + get("port") + " · 端口默认 5004（AES67 RTP 标准）；上面两个只是快捷填充，自定义时「自定义」会亮起")
                                 RowLabel("ptime") {
-                                    listOf(125, 250, 500, 1000).forEach { us ->
+                                    listOf(125, 250, 500, 1000, 2000, 4000).forEach { us ->
                                         OptChip(
-                                            if (us == 125) "125us·实验" else us.toString() + "us",
+                                            when (us) {
+                                                125 -> "125us·实验"
+                                                2000 -> "2ms·AES67"
+                                                4000 -> "4ms·省CPU"
+                                                else -> us.toString() + "us"
+                                            },
                                             selected = get("ptime_us") == us.toString()
                                         ) {
                                             set("ptime_us", us.toString())
                                         }
                                     }
                                 }
-                                Hint("1000us = ST 2110-30 Level A（正式路径）。125us（Level B）在本机实测有丢包且需自旋占一个核，仅作实验，不用于生产；250/500us 为 AES67 附加档。")
+                                Hint("1000us = ST 2110-30 Level A（正式路径）。125us（Level B）在本机实测有丢包且需自旋占一个核，仅作实验；250/500us 为 AES67 附加档。2/4ms 仅 AES67（ST 2110-30 不允许）：包率降到 1/2、1/4，发送 CPU 明显下降，但延迟 +1/+3ms 且接收端必须支持对应 ptime；4ms 多声道会自动拆成更多 RTP 流。")
                                 RowLabel("编码") {
                                     OptChip("L24", selected = get("codec") == "pcm") { set("codec", "pcm") }
                                     OptChip("L16", selected = get("codec") == "l16") { set("codec", "l16") }

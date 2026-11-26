@@ -89,7 +89,10 @@ impl SharedState {
         self.sdps().into_iter().next()
     }
     pub fn sdps(&self) -> Vec<String> {
-        self.sdp.lock().map(|guard| guard.clone()).unwrap_or_default()
+        self.sdp
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
     pub fn rtp_params(&self) -> Option<RtpParams> {
         self.params.lock().ok().and_then(|guard| guard.clone())
@@ -168,9 +171,9 @@ impl Daemon {
             );
         }
         let group_ip = cfg.group_ip();
-        let local_ip = cfg
-            .local_ip
-            .unwrap_or_else(|| platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED));
+        let local_ip = cfg.local_ip.unwrap_or_else(|| {
+            platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        });
         let encoding = if cfg.encoding == Encoding::L24 {
             RtpEncoding::L24
         } else {
@@ -211,9 +214,18 @@ impl Daemon {
                 "WARN ptime_us={} is experimental on Android (short packet times need a busy-spin pacer and still lose slots); the supported ST 2110-30 level is A (1 ms = 1000 us)",
                 cfg.ptime_us
             );
+        } else if cfg.ptime_us > 1_000 {
+            logln!(
+                "WARN ptime_us={} is AES67-only (AES67-2023 Table 2): ST 2110-30 allows only 1 ms (Level A) and 125 us (Level B); receivers that require 1 ms will not lock, and multichannel L24 streams are split over more RTP flows to stay inside the 1440-byte payload budget",
+                cfg.ptime_us
+            );
         }
         if cfg.pt != 0 {
-            let expected = if cfg.encoding == Encoding::L24 { 97 } else { 96 };
+            let expected = if cfg.encoding == Encoding::L24 {
+                97
+            } else {
+                96
+            };
             if cfg.pt != expected {
                 logln!(
                     "WARN pt={} with encoding={} (AES67 default mapping is 97=L24 / 96=L16); receivers that derive the sample width from the PT will misread this stream",
@@ -260,10 +272,11 @@ impl Daemon {
         if cfg.codec == "auto" {
             return self.run_auto(&cfg);
         }
+        let mut warm: Option<WarmSession> = None;
         if matches!(cfg.codec.as_str(), "bits" | "eac3" | "truehd") {
-            return self.run_bits(&cfg, false);
+            return self.run_bits(&cfg, false, &mut warm);
         }
-        self.run_pcm(&cfg, false)
+        self.run_pcm(&cfg, false, &mut warm)
     }
 
     /// Keep a silent AES67 session up while no live source exists.
@@ -271,16 +284,22 @@ impl Daemon {
     /// RTP stream: this sends packet-timed silence at the configured layout/PT and
     /// lets aes67-daemon (or any SAP browser) discover and configure the source at
     /// any time, not just while music/movie is playing.
-    fn run_idle_session(&mut self, cfg: &Config) -> Result<i32, (i32, String)> {
+    fn run_idle_session(
+        &mut self,
+        cfg: &Config,
+        warm: &mut Option<WarmSession>,
+    ) -> Result<i32, (i32, String)> {
         let trim = Arc::clone(&self.trim);
         let layout_id = cfg.layout.trim();
         if layout_id.is_empty() {
-            return Err((EXIT_USAGE, "idle session needs a configured layout".to_string()));
+            return Err((
+                EXIT_USAGE,
+                "idle session needs a configured layout".to_string(),
+            ));
         }
         let channels = crate::config::layout_channels(layout_id)
             .unwrap_or_else(|| cfg.maxch.max(2))
             .max(1);
-        let layout_plan = rendered_layout_plan(layout_id, layout_id, channels);
         let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
             .ok_or((EXIT_USAGE, format!("unsupported ptime {} us", cfg.ptime_us)))?;
         let encoding = if cfg.encoding == Encoding::L24 {
@@ -288,54 +307,96 @@ impl Daemon {
         } else {
             RtpEncoding::L16
         };
-        let group_ip = cfg.group_ip();
-        let local_ip = cfg.local_ip.unwrap_or_else(|| {
-            platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
-        });
-        let plan = plan_flows(cfg, &timing, encoding, layout_plan.channels, platform::now_ns())
-            .map_err(|message| (EXIT_USAGE, message))?;
-        let mut ring_cfg = cfg.clone();
-        ring_cfg.buffer_ms = ring_cfg.buffer_ms.max(2_000);
-        ring_cfg.prebuffer_ms = ring_cfg.prebuffer_ms.min(ring_cfg.buffer_ms / 4);
-        let (session, ptp_mode) = start_session_with_ptp_fallback(
-            &ring_cfg,
-            local_ip,
-            &timing,
-            encoding,
-            &layout_plan,
-            &plan,
-            self.ptp_mode,
-        )
-        .map_err(|message| (EXIT_USAGE, message))?;
-        self.ptp_mode = ptp_mode;
-        publish_sdp(&session, cfg, &plan, &self.shared);
-        logln!(
-            "IDLE session up layout={} ch={} flows={} ptp={} (silent RTP keeps SAP discoverable)",
-            layout_plan.output_layout,
-            channels,
-            plan.len(),
-            self.ptp_mode
-        );
+        // Reuse the session kept warm by a previous live source: no PTP re-lock,
+        // no SAP withdraw/announce, RTP timestamps continue on the same grid.
+        let (mut session, plan, mut first) = match warm.take() {
+            Some(warm_session) if warm_session.matches_target(layout_id, channels) => {
+                self.ptp_mode = warm_session.ptp_mode;
+                logln!(
+                    "IDLE session reused layout={} ch={} (PTP lock kept; silent RTP continues)",
+                    layout_id,
+                    channels
+                );
+                (warm_session.session, warm_session.plan, warm_session.first)
+            }
+            other => {
+                if let Some(stale) = other {
+                    let rc = stale.session.stop(2_000);
+                    if rc != 0 {
+                        logln!("WARN stale warm session stop code={rc}");
+                    }
+                }
+                let layout_plan = rendered_layout_plan(layout_id, layout_id, channels);
+                let group_ip = cfg.group_ip();
+                let local_ip = cfg.local_ip.unwrap_or_else(|| {
+                    platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
+                });
+                let plan = plan_flows(
+                    cfg,
+                    &timing,
+                    encoding,
+                    layout_plan.channels,
+                    platform::now_ns(),
+                )
+                .map_err(|message| (EXIT_USAGE, message))?;
+                let mut ring_cfg = cfg.clone();
+                ring_cfg.buffer_ms = ring_cfg.buffer_ms.max(2_000);
+                ring_cfg.prebuffer_ms = ring_cfg.prebuffer_ms.min(ring_cfg.buffer_ms / 4);
+                let (session, ptp_mode) = start_session_with_ptp_fallback(
+                    &ring_cfg,
+                    local_ip,
+                    &timing,
+                    encoding,
+                    &layout_plan,
+                    &plan,
+                    self.ptp_mode,
+                )
+                .map_err(|message| (EXIT_USAGE, message))?;
+                self.ptp_mode = ptp_mode;
+                publish_sdp(&session, cfg, &plan, &self.shared);
+                logln!(
+                    "IDLE session up layout={} ch={} flows={} ptp={} (silent RTP keeps SAP discoverable)",
+                    layout_plan.output_layout,
+                    channels,
+                    plan.len(),
+                    self.ptp_mode
+                );
+                (session, plan, 0)
+            }
+        };
         let shape = StreamShape {
             channels,
             source_channels: channels,
             map: (0..channels).collect(),
-            layout: layout_plan.output_layout.clone(),
+            layout: layout_id.to_string(),
             rate: crate::OUT_RATE,
             fmt: SampleFmt::S16,
             stream_id: 0,
         };
         let frames = timing.samples_per_packet().max(1) as usize;
         let zeros = vec![0.0f32; frames * channels];
-        let mut first = 0u64;
         let mut last_status_ns = platform::now_ns();
         loop {
             if platform::stop_requested() {
-                break;
+                let rc = session.stop(2_000);
+                if rc != 0 {
+                    logln!("WARN IDLE session stop code={rc}");
+                }
+                return Ok(EXIT_OK);
             }
             if auto_source(cfg) != AutoSource::Idle {
-                logln!("IDLE session released: a live source appeared");
-                break;
+                logln!("IDLE session released: a live source appeared (session kept warm)");
+                *warm = Some(WarmSession {
+                    session,
+                    plan,
+                    channels,
+                    source_channels: channels,
+                    map: (0..channels).collect(),
+                    output_layout: layout_id.to_string(),
+                    first,
+                    ptp_mode: self.ptp_mode,
+                });
+                return Ok(EXIT_OK);
             }
             let mut rc = 0;
             let mut attempts = 0u32;
@@ -364,15 +425,20 @@ impl Daemon {
                     src_rate: crate::OUT_RATE,
                     _marker: std::marker::PhantomData,
                 };
-                write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None, &trim);
+                write_status(
+                    &session,
+                    cfg,
+                    &plan,
+                    &parts,
+                    0,
+                    &shape,
+                    self.ptp_mode,
+                    None,
+                    &trim,
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let rc = session.stop(2_000);
-        if rc != 0 {
-            logln!("WARN IDLE session stop code={rc}");
-        }
-        Ok(EXIT_OK)
     }
 
     /// codec=auto: probe both HAL tee sources and run whichever one is live.
@@ -386,14 +452,21 @@ impl Daemon {
             cfg.bits_meta,
             cfg.meta
         );
+        // One RTP session stays warm across the idle/PCM transitions. The bits
+        // path still owns its decoded layout, so entering it releases the warm
+        // session (the next idle/PCM start rebuilds only if that one is gone).
+        let mut warm: Option<WarmSession> = None;
         loop {
             if platform::stop_requested() {
+                if let Some(session) = warm.take() {
+                    let _ = session.session.stop(2_000);
+                }
                 return Ok(EXIT_OK);
             }
             match auto_source(cfg) {
                 AutoSource::Bits => {
                     logln!("AUTO source=bits (HAL tee compressed ES)");
-                    match self.run_bits(cfg, true) {
+                    match self.run_bits(cfg, true, &mut warm) {
                         Ok(code) => {
                             if code != EXIT_OK {
                                 return Ok(code);
@@ -409,7 +482,7 @@ impl Daemon {
                 }
                 AutoSource::Pcm => {
                     logln!("AUTO source=pcm (HAL decoded PCM)");
-                    match self.run_pcm(cfg, true) {
+                    match self.run_pcm(cfg, true, &mut warm) {
                         Ok(code) => {
                             if code != EXIT_OK {
                                 return Ok(code);
@@ -427,7 +500,7 @@ impl Daemon {
                     // Keep a silent session up while idle: SAP only describes a
                     // running session, and controllers must be able to discover /
                     // configure the source at any time, not just during playback.
-                    match self.run_idle_session(cfg) {
+                    match self.run_idle_session(cfg, &mut warm) {
                         Ok(_) => {}
                         Err((EXIT_USAGE, message)) => return Err((EXIT_USAGE, message)),
                         Err((code, message)) => {
@@ -445,7 +518,12 @@ impl Daemon {
     /// optional ROAR render stage carries gain, downmix and the look-ahead limiter.
     /// `auto` = the router owns the loop: return when live.bits becomes the live
     /// source, or after the stream has been silent for `AUTO_IDLE`.
-    fn run_pcm(&mut self, cfg: &Config, auto: bool) -> Result<i32, (i32, String)> {
+    fn run_pcm(
+        &mut self,
+        cfg: &Config,
+        auto: bool,
+        warm: &mut Option<WarmSession>,
+    ) -> Result<i32, (i32, String)> {
         let cfg = cfg.clone();
         let trim = Arc::clone(&self.trim);
         let group_ip = cfg.group_ip();
@@ -526,11 +604,16 @@ impl Daemon {
                     break;
                 }
                 if auto && bits_stream_active(&cfg) {
-                    logln!("AUTO switch: live.bits became the live source; releasing the PCM session");
+                    logln!(
+                        "AUTO switch: live.bits became the live source; releasing the PCM session"
+                    );
                     break;
                 }
                 if auto && session.is_some() && source_idle(last_data_ns, cfg.auto_idle_ms) {
-                    logln!("AUTO idle: no live.pcm bytes for {} ms; releasing the PCM session", cfg.auto_idle_ms);
+                    logln!(
+                        "AUTO idle: no live.pcm bytes for {} ms; releasing the PCM session",
+                        cfg.auto_idle_ms
+                    );
                     break;
                 }
                 let now = platform::now_ns();
@@ -574,13 +657,17 @@ impl Daemon {
                 // (IAMF downmix for legal pairs, EAR otherwise), so the wire layout is the target.
                 // Without a usable target/source layout the legacy strict intersection is kept
                 // (missing target channels not filled, extra source channels dropped, no downmix).
-                let source_layout_id =
-                    match meta.layout.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        Some(id) if crate::config::layout_channels(id) == Some(source_channels) => {
-                            id.to_string()
-                        }
-                        _ => crate::config::derive_layout(source_channels).to_string(),
-                    };
+                let source_layout_id = match meta
+                    .layout
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(id) if crate::config::layout_channels(id) == Some(source_channels) => {
+                        id.to_string()
+                    }
+                    _ => crate::config::derive_layout(source_channels).to_string(),
+                };
                 let layout_plan = classify_pcm_layout(
                     &cfg,
                     &source_layout_id,
@@ -604,68 +691,103 @@ impl Daemon {
                     || current.source_channels != source_channels
                     || current.layout != layout_plan.output_layout
                     || current.map != layout_plan.map
-                    || current.rate != rate
-                    || current.stream_id != stream_id;
+                    || current.rate != rate;
                 if changed {
-                    if let Some(old) = session.take() {
-                        let rc = old.stop(2_000);
-                        if rc != 0 {
-                            logln!("WARN previous session stop code={rc}");
+                    // Reuse the warm session when the wire shape matches: no
+                    // session.stop(), no PTP re-lock, no SAP withdraw/announce.
+                    // Only a real layout/channel change releases it.
+                    let reuse = warm
+                        .as_ref()
+                        .is_some_and(|warm_session| warm_session.matches_shape(&layout_plan));
+                    let mut reused_first = 0u64;
+                    if reuse {
+                        let warm_session = warm.take().expect("warm session checked");
+                        self.ptp_mode = warm_session.ptp_mode;
+                        plan = warm_session.plan;
+                        session = Some(warm_session.session);
+                        reused_first = warm_session.first;
+                        logln!(
+                            "META src_ch={} out_ch={} layout={} target={} source={} rate={} fmt={} sid={} flows={} encoding={} ptime_us={} (session reused; PTP lock kept)",
+                            source_channels,
+                            channels,
+                            layout_plan.output_layout,
+                            if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
+                            if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
+                            rate,
+                            fmt.name(),
+                            stream_id,
+                            plan.len(),
+                            encoding.codec(),
+                            cfg.ptime_us
+                        );
+                    } else {
+                        if let Some(old) = session.take() {
+                            let rc = old.stop(2_000);
+                            if rc != 0 {
+                                logln!("WARN previous session stop code={rc}");
+                            }
                         }
-                    }
-                    plan = plan_flows(&cfg, &timing, encoding, channels, now)
+                        if let Some(stale) = warm.take() {
+                            let rc = stale.session.stop(2_000);
+                            if rc != 0 {
+                                logln!("WARN stale warm session stop code={rc}");
+                            }
+                        }
+                        plan = plan_flows(&cfg, &timing, encoding, channels, now)
+                            .map_err(|message| (EXIT_USAGE, message))?;
+                        let (fresh, ptp_mode) = start_session_with_ptp_fallback(
+                            &cfg,
+                            local_ip,
+                            &timing,
+                            encoding,
+                            &layout_plan,
+                            &plan,
+                            self.ptp_mode,
+                        )
                         .map_err(|message| (EXIT_USAGE, message))?;
+                        self.ptp_mode = ptp_mode;
+                        logln!(
+                            "META src_ch={} out_ch={} layout={} target={} source={} rate={} fmt={} sid={} flows={} encoding={} ptime_us={}",
+                            source_channels,
+                            channels,
+                            layout_plan.output_layout,
+                            if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
+                            if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
+                            rate,
+                            fmt.name(),
+                            stream_id,
+                            plan.len(),
+                            encoding.codec(),
+                            cfg.ptime_us
+                        );
+                        if !layout_plan.missing.is_empty() {
+                            logln!(
+                                "INFO layout {} + source {} -> {} ({}ch); target channels not present, not filled: {}",
+                                if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
+                                if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
+                                layout_plan.output_layout,
+                                channels,
+                                layout_plan.missing.join(",")
+                            );
+                        }
+                        if !layout_plan.dropped.is_empty() {
+                            logln!(
+                                "WARN layout {} + source {} -> {} ({}ch); dropping source channels outside target (no downmix): {}",
+                                if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
+                                if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
+                                layout_plan.output_layout,
+                                channels,
+                                layout_plan.dropped.join(",")
+                            );
+                        }
+                        publish_sdp(&fresh, &cfg, &plan, &self.shared);
+                        session = Some(fresh);
+                    }
                     resampler = make_resampler(&cfg, rate, source_channels)
                         .map_err(|message| (EXIT_USAGE, message))?;
-                    let (fresh, ptp_mode) = start_session_with_ptp_fallback(
-                        &cfg,
-                        local_ip,
-                        &timing,
-                        encoding,
-                        &layout_plan,
-                        &plan,
-                        self.ptp_mode,
-                    )
-                    .map_err(|message| (EXIT_USAGE, message))?;
-                    self.ptp_mode = ptp_mode;
-                    logln!(
-                        "META src_ch={} out_ch={} layout={} target={} source={} rate={} fmt={} sid={} flows={} encoding={} ptime_us={}",
-                        source_channels,
-                        channels,
-                        layout_plan.output_layout,
-                        if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
-                        if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
-                        rate,
-                        fmt.name(),
-                        stream_id,
-                        plan.len(),
-                        encoding.codec(),
-                        cfg.ptime_us
-                    );
-                    if !layout_plan.missing.is_empty() {
-                        logln!(
-                            "INFO layout {} + source {} -> {} ({}ch); target channels not present, not filled: {}",
-                            if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
-                            if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
-                            layout_plan.output_layout,
-                            channels,
-                            layout_plan.missing.join(",")
-                        );
-                    }
-                    if !layout_plan.dropped.is_empty() {
-                        logln!(
-                            "WARN layout {} + source {} -> {} ({}ch); dropping source channels outside target (no downmix): {}",
-                            if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
-                            if layout_plan.source.is_empty() { "unknown" } else { &layout_plan.source },
-                            layout_plan.output_layout,
-                            channels,
-                            layout_plan.dropped.join(",")
-                        );
-                    }
-                    publish_sdp(&fresh, &cfg, &plan, &self.shared);
-                    session = Some(fresh);
                     submitter = Submitter::new(layout_plan.source_channels);
                     submitter.set_gain(10f32.powf(cfg.gain_db.clamp(-60.0, 12.0) / 20.0));
+                    submitter.first = reused_first;
                     if let Some(stage) = render_stage.as_mut() {
                         stage.reset();
                     }
@@ -687,6 +809,20 @@ impl Daemon {
                         fmt,
                         stream_id,
                     };
+                } else if current.stream_id != stream_id {
+                    // New playback window with the same wire shape: keep the
+                    // session (and PTP lock) and realign the FIFO reader.
+                    logln!(
+                        "META stream {} -> {} (same shape; session kept; PTP lock kept)",
+                        current.stream_id,
+                        stream_id
+                    );
+                    let stale = drain_source(&mut source);
+                    if stale > 0 {
+                        logln!("PCM stream change: discarded {} stale FIFO byte(s)", stale);
+                    }
+                    carry.clear();
+                    current.stream_id = stream_id;
                 } else if current.fmt != fmt {
                     // Format-only change: buffers must be re-aligned but the RTP
                     // stream identity (SSRC/SDP) stays valid.
@@ -820,7 +956,13 @@ impl Daemon {
                         active,
                         &cfg,
                         &plan,
-                        &seat(&meter, &resampler, &submitter, age_ms(last_data_ns), current.rate),
+                        &seat(
+                            &meter,
+                            &resampler,
+                            &submitter,
+                            age_ms(last_data_ns),
+                            current.rate,
+                        ),
                         fifo_last,
                         &current,
                         self.ptp_mode,
@@ -836,7 +978,11 @@ impl Daemon {
                     logln!("WARN PCM source silent for {} ms (HAL tee stopped writing live.pcm; sending silence)", gap_ms);
                 } else if gap_ms < 50 && silent_warned {
                     silent_warned = false;
-                    let ms = if silent_since_ns > 0 { (now - silent_since_ns) / 1_000_000 } else { 0 };
+                    let ms = if silent_since_ns > 0 {
+                        (now - silent_since_ns) / 1_000_000
+                    } else {
+                        0
+                    };
                     logln!("PCM source resumed after {} ms of silence", ms);
                 }
                 if now - last_stat_ns > 10_000_000_000 {
@@ -905,7 +1051,13 @@ impl Daemon {
                 active,
                 &cfg,
                 &plan,
-                &seat(&meter, &resampler, &submitter, age_ms(last_data_ns), current.rate),
+                &seat(
+                    &meter,
+                    &resampler,
+                    &submitter,
+                    age_ms(last_data_ns),
+                    current.rate,
+                ),
                 fifo_last,
                 &current,
                 self.ptp_mode,
@@ -931,10 +1083,36 @@ impl Daemon {
                 resampler.rs_out()
             );
         }
-        if let Some(active) = session.take() {
-            let rc = active.stop(2_000);
-            if rc != 0 {
-                logln!("WARN session stop code={rc}");
+        // Keep the session (and its PTP lock) warm when the router will pick a
+        // different source next; stop it only on a real shutdown or a failed run.
+        let mut kept = false;
+        if auto && result.is_ok() {
+            if let Some(active) = session.take() {
+                let channels = current.channels;
+                let source_channels = current.source_channels;
+                let map = current.map.clone();
+                let output_layout = current.layout.clone();
+                let first = submitter.first;
+                *warm = Some(WarmSession {
+                    session: active,
+                    plan,
+                    channels,
+                    source_channels,
+                    map,
+                    output_layout,
+                    first,
+                    ptp_mode: self.ptp_mode,
+                });
+                kept = true;
+                logln!("PCM session kept warm for the next source (first={first}; PTP lock kept)");
+            }
+        }
+        if !kept {
+            if let Some(active) = session.take() {
+                let rc = active.stop(2_000);
+                if rc != 0 {
+                    logln!("WARN session stop code={rc}");
+                }
             }
         }
         result.map(|_| EXIT_OK)
@@ -942,7 +1120,12 @@ impl Daemon {
 
     /// codec=bits: decode the HAL tee compressed ES (live.bits) to PCM and feed
     /// the same AES67 session. Core AC-3/E-AC-3 only; no DSP, no down/upmix.
-    fn run_bits(&mut self, cfg: &Config, auto: bool) -> Result<i32, (i32, String)> {
+    fn run_bits(
+        &mut self,
+        cfg: &Config,
+        auto: bool,
+        warm: &mut Option<WarmSession>,
+    ) -> Result<i32, (i32, String)> {
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicU64;
 
@@ -982,7 +1165,11 @@ impl Daemon {
             // The TV app treats a stale status.json as "daemon not running".
             if now - last_heartbeat > 500_000_000 {
                 last_heartbeat = now;
-                write_idle_status(cfg, if cfg.ptp { "multicast" } else { "local" }, trim.as_ref());
+                write_idle_status(
+                    cfg,
+                    if cfg.ptp { "multicast" } else { "local" },
+                    trim.as_ref(),
+                );
             }
             // Keep the FIFO drained while the codec is unknown (bounded memory).
             if prefetched.len() < 8 * 1024 * 1024 {
@@ -1025,9 +1212,7 @@ impl Daemon {
                             meta.rate
                         );
                     }
-                    !stale
-                        && (meta.is_truehd()
-                            || (meta.is_dolby_es() && meta.rate == 48_000))
+                    !stale && (meta.is_truehd() || (meta.is_dolby_es() && meta.rate == 48_000))
                 }
                 None => false,
             };
@@ -1038,7 +1223,12 @@ impl Daemon {
             };
             let bytes_truehd = detected == dolby_pipeline::bits::Codec::TrueHd;
             let want_truehd = matches!(cfg.codec.as_str(), "truehd" | "auto" | "bits");
-            if want_truehd && (bytes_truehd || meta_candidate.as_ref().is_some_and(meta::BitsMeta::is_truehd)) {
+            if want_truehd
+                && (bytes_truehd
+                    || meta_candidate
+                        .as_ref()
+                        .is_some_and(meta::BitsMeta::is_truehd))
+            {
                 let bits_meta = meta_candidate.unwrap_or_else(|| meta::BitsMeta {
                     stream_id: 0,
                     fmt: 0x0E00_0000,
@@ -1051,6 +1241,12 @@ impl Daemon {
                     bytes: prefetched.len() as u64,
                     dropped: 0,
                 });
+                if let Some(stale) = warm.take() {
+                    let rc = stale.session.stop(2_000);
+                    if rc != 0 {
+                        logln!("WARN warm session stop code={rc}");
+                    }
+                }
                 return self.run_truehd(cfg, auto, &bits_meta, bits_source, prefetched);
             }
             // codec=truehd must never fall through to the AC3/EAC3 path on a
@@ -1085,7 +1281,11 @@ impl Daemon {
         }
         let source_channels = bits_meta.channels().clamp(1, MAX_CH);
         let derive = crate::config::derive_layout(source_channels);
-        let source_layout = if derive.is_empty() { None } else { Some(derive) };
+        let source_layout = if derive.is_empty() {
+            None
+        } else {
+            Some(derive)
+        };
         let layout_plan = plan_layout(&cfg.layout, source_channels, source_layout)
             .map_err(|message| (EXIT_USAGE, message))?;
         let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
@@ -1101,19 +1301,54 @@ impl Daemon {
         let mut ring_cfg = cfg.clone();
         ring_cfg.buffer_ms = ring_cfg.buffer_ms.max(2_000);
         ring_cfg.prebuffer_ms = ring_cfg.prebuffer_ms.min(ring_cfg.buffer_ms / 4);
-        let plan = plan_flows(cfg, &timing, encoding, layout_plan.channels, platform::now_ns())
-            .map_err(|message| (EXIT_USAGE, message))?;
-        let (session, ptp_mode) = start_session_with_ptp_fallback(
-            &ring_cfg,
-            local_ip,
+        let plan = plan_flows(
+            cfg,
             &timing,
             encoding,
-            &layout_plan,
-            &plan,
-            self.ptp_mode,
+            layout_plan.channels,
+            platform::now_ns(),
         )
         .map_err(|message| (EXIT_USAGE, message))?;
-        self.ptp_mode = ptp_mode;
+        // Reuse the warm session when the decoded wire shape matches (same
+        // channels/map/layout): PCM and AC-3/E-AC-3 then share one RTP session
+        // and switch without a PTP re-lock or SAP flap.
+        let (session, plan, mut first, reused) = match warm.take() {
+            Some(warm_session) if warm_session.matches_shape(&layout_plan) => {
+                self.ptp_mode = warm_session.ptp_mode;
+                logln!(
+                    "BITS session reused src_ch={} out_ch={} layout={} (PTP lock kept)",
+                    layout_plan.source_channels,
+                    layout_plan.channels,
+                    layout_plan.output_layout
+                );
+                (
+                    warm_session.session,
+                    warm_session.plan,
+                    warm_session.first,
+                    true,
+                )
+            }
+            other => {
+                if let Some(stale) = other {
+                    let rc = stale.session.stop(2_000);
+                    if rc != 0 {
+                        logln!("WARN stale warm session stop code={rc}");
+                    }
+                }
+                let (fresh, ptp_mode) = start_session_with_ptp_fallback(
+                    &ring_cfg,
+                    local_ip,
+                    &timing,
+                    encoding,
+                    &layout_plan,
+                    &plan,
+                    self.ptp_mode,
+                )
+                .map_err(|message| (EXIT_USAGE, message))?;
+                self.ptp_mode = ptp_mode;
+                (fresh, plan, 0u64, false)
+            }
+        };
         let shape = StreamShape {
             channels: layout_plan.channels,
             source_channels: layout_plan.source_channels,
@@ -1137,7 +1372,9 @@ impl Daemon {
             cfg.ptime_us,
             cfg.bits
         );
-        publish_sdp(&session, cfg, &plan, &self.shared);
+        if !reused {
+            publish_sdp(&session, cfg, &plan, &self.shared);
+        }
         let mut decoder = crate::bitstream::BitsDecoder::new();
         if !prefetched.is_empty() {
             decoder.push_bytes(&prefetched);
@@ -1147,19 +1384,24 @@ impl Daemon {
             None
         } else {
             Some(std::fs::File::create(&cfg.dump_bits).map_err(|err| {
-                (EXIT_USAGE, format!("create --dump-bits {} failed: {err}", cfg.dump_bits))
+                (
+                    EXIT_USAGE,
+                    format!("create --dump-bits {} failed: {err}", cfg.dump_bits),
+                )
             })?)
         };
         let mut dump_pcm_file = if cfg.dump_pcm.is_empty() {
             None
         } else {
             Some(std::fs::File::create(&cfg.dump_pcm).map_err(|err| {
-                (EXIT_USAGE, format!("create --dump-pcm {} failed: {err}", cfg.dump_pcm))
+                (
+                    EXIT_USAGE,
+                    format!("create --dump-pcm {} failed: {err}", cfg.dump_pcm),
+                )
             })?)
         };
         let ring_capacity = cfg.buffer_ms.max(2_000) as usize * crate::OUT_RATE as usize / 1000;
         let mut queue: VecDeque<f32> = VecDeque::new();
-        let mut first = 0u64;
         let mut submitted = 0u64;
         let mut bytes_read = 0u64;
         let mut frames_decoded = 0u64;
@@ -1187,9 +1429,7 @@ impl Daemon {
                 // E-AC-3 bursts often decode faster than real time; wait for
                 // ring space instead of dropping most of the burst (QUEUE_FULL).
                 let mut waited = 0u32;
-                while session.ring_frames() + chunk_frames + 480 > ring_capacity
-                    && waited < 2_500
-                {
+                while session.ring_frames() + chunk_frames + 480 > ring_capacity && waited < 2_500 {
                     std::thread::sleep(Duration::from_millis(2));
                     waited += 1;
                 }
@@ -1236,7 +1476,10 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
-                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms)) {
+                if auto
+                    && !bits_stream_active(cfg)
+                    && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms))
+                {
                     logln!("AUTO switch: live.bits went quiet; releasing the bits session");
                     break;
                 }
@@ -1312,7 +1555,13 @@ impl Daemon {
                         }
                     }
                 }
-                submit_into(&session, &mut queue, &mut first, &mut submitted, &mut submit_warned);
+                submit_into(
+                    &session,
+                    &mut queue,
+                    &mut first,
+                    &mut submitted,
+                    &mut submit_warned,
+                );
                 if queue.len() > 48_000 * source_channels * 4 {
                     let excess = queue.len() / source_channels - 48_000 * 2;
                     for _ in 0..(excess * source_channels) {
@@ -1337,7 +1586,17 @@ impl Daemon {
                         src_rate: 48_000,
                         _marker: std::marker::PhantomData,
                     };
-                    write_status(&session, cfg, &plan, &parts, queue.len() / source_channels, &shape, self.ptp_mode, None, trim.as_ref());
+                    write_status(
+                        &session,
+                        cfg,
+                        &plan,
+                        &parts,
+                        queue.len() / source_channels,
+                        &shape,
+                        self.ptp_mode,
+                        None,
+                        trim.as_ref(),
+                    );
                     meter.reset();
                     logln!(
                         "BITS STAT bytes={} frames_decoded={} submitted={} queue_frames={} decoder_errors={} nonzero_samples={} send_err={} ring_fill={} drops={} silent={}",
@@ -1367,7 +1626,13 @@ impl Daemon {
             }
             Ok(())
         })();
-        submit_into(&session, &mut queue, &mut first, &mut submitted, &mut submit_warned);
+        submit_into(
+            &session,
+            &mut queue,
+            &mut first,
+            &mut submitted,
+            &mut submit_warned,
+        );
         let parts = StatusParts {
             rs_in: crate::OUT_RATE as u64,
             rs_out: crate::OUT_RATE as u64,
@@ -1379,7 +1644,17 @@ impl Daemon {
             src_rate: 48_000,
             _marker: std::marker::PhantomData,
         };
-        write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None, &trim);
+        write_status(
+            &session,
+            cfg,
+            &plan,
+            &parts,
+            0,
+            &shape,
+            self.ptp_mode,
+            None,
+            &trim,
+        );
         let counters = session.counters();
         logln!(
             "BITS EXIT bytes={} decoded_frames={} submitted={} decoder_errors={} nonzero_samples={} eofs={} send_err={} drops={} silent={}",
@@ -1393,9 +1668,23 @@ impl Daemon {
             counters.dropped,
             counters.silent
         );
-        let rc = session.stop(2_000);
-        if rc != 0 {
-            logln!("WARN BITS session stop code={rc}");
+        if auto && result.is_ok() {
+            *warm = Some(WarmSession {
+                session,
+                plan,
+                channels: layout_plan.channels,
+                source_channels: layout_plan.source_channels,
+                map: layout_plan.map.clone(),
+                output_layout: layout_plan.output_layout.clone(),
+                first,
+                ptp_mode: self.ptp_mode,
+            });
+            logln!("BITS session kept warm for the next source (first={first}; PTP lock kept)");
+        } else {
+            let rc = session.stop(2_000);
+            if rc != 0 {
+                logln!("WARN BITS session stop code={rc}");
+            }
         }
         result.map(|_| EXIT_OK)
     }
@@ -1417,7 +1706,8 @@ impl Daemon {
         if target.is_empty() {
             return Err((
                 EXIT_USAGE,
-                "codec=truehd needs --target-layout/--layout= (5.1.2|7.1.2|7.1.4|9.1.6)".to_string(),
+                "codec=truehd needs --target-layout/--layout= (5.1.2|7.1.2|7.1.4|9.1.6)"
+                    .to_string(),
             ));
         }
         if target == "4.1.2" {
@@ -1427,7 +1717,12 @@ impl Daemon {
             ));
         }
         let mut pipeline = dolby_pipeline::ObjectPipeline::new_with(&target, cfg.limiter_db)
-            .map_err(|err| (EXIT_USAGE, format!("truehd pipeline init target={target} failed: {err}")))?;
+            .map_err(|err| {
+                (
+                    EXIT_USAGE,
+                    format!("truehd pipeline init target={target} failed: {err}"),
+                )
+            })?;
         pipeline.set_dialnorm_enabled(cfg.dialnorm);
         pipeline.set_user_gain_db(cfg.gain_db);
         let timing = PacketTiming::new(crate::OUT_RATE, cfg.ptime_us)
@@ -1447,14 +1742,20 @@ impl Daemon {
             None
         } else {
             Some(std::fs::File::create(&cfg.dump_bits).map_err(|err| {
-                (EXIT_USAGE, format!("create --dump-bits {} failed: {err}", cfg.dump_bits))
+                (
+                    EXIT_USAGE,
+                    format!("create --dump-bits {} failed: {err}", cfg.dump_bits),
+                )
             })?)
         };
         let mut dump_pcm_file = if cfg.dump_pcm.is_empty() {
             None
         } else {
             Some(std::fs::File::create(&cfg.dump_pcm).map_err(|err| {
-                (EXIT_USAGE, format!("create --dump-pcm {} failed: {err}", cfg.dump_pcm))
+                (
+                    EXIT_USAGE,
+                    format!("create --dump-pcm {} failed: {err}", cfg.dump_pcm),
+                )
             })?)
         };
         let mut session: Option<Session> = None;
@@ -1486,7 +1787,10 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
-                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms)) {
+                if auto
+                    && !bits_stream_active(cfg)
+                    && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms))
+                {
                     logln!("AUTO switch: live.bits went quiet; releasing the bits session");
                     break;
                 }
@@ -1527,8 +1831,9 @@ impl Daemon {
                                 "WARN truehd pipeline error #{}: {err}; resetting pipeline",
                                 pipeline_errors
                             );
-                            pipeline = dolby_pipeline::ObjectPipeline::new_with(&target, cfg.limiter_db)
-                                .map_err(|reset_err| {
+                            pipeline =
+                                dolby_pipeline::ObjectPipeline::new_with(&target, cfg.limiter_db)
+                                    .map_err(|reset_err| {
                                     (
                                         EXIT_USAGE,
                                         format!("truehd pipeline reset failed: {reset_err}"),
@@ -1579,42 +1884,43 @@ impl Daemon {
                             pending.push(block);
                         }
                         for block in pending.drain(..) {
-                        let channels = block.channels.len();
-                        let actual_id = block.actual.id().to_string();
-                        last_objects = block.object_count;
-                        let rebuild = shape
-                            .as_ref()
-                            .map_or(true, |s| s.channels != channels || s.layout != actual_id);
-                        if rebuild {
-                            if let Some(old) = session.take() {
-                                let rc = old.stop(2_000);
-                                if rc != 0 {
-                                    logln!("WARN TRUEHD session stop code={rc}");
+                            let channels = block.channels.len();
+                            let actual_id = block.actual.id().to_string();
+                            last_objects = block.object_count;
+                            let rebuild = shape
+                                .as_ref()
+                                .map_or(true, |s| s.channels != channels || s.layout != actual_id);
+                            if rebuild {
+                                if let Some(old) = session.take() {
+                                    let rc = old.stop(2_000);
+                                    if rc != 0 {
+                                        logln!("WARN TRUEHD session stop code={rc}");
+                                    }
                                 }
-                            }
-                            let layout_plan = plan_layout(&cfg.layout, channels, Some(&actual_id))
+                                let layout_plan =
+                                    plan_layout(&cfg.layout, channels, Some(&actual_id))
+                                        .map_err(|message| (EXIT_USAGE, message))?;
+                                let new_plan = plan_flows(
+                                    cfg,
+                                    &timing,
+                                    encoding,
+                                    layout_plan.channels,
+                                    platform::now_ns(),
+                                )
                                 .map_err(|message| (EXIT_USAGE, message))?;
-                            let new_plan = plan_flows(
-                                cfg,
-                                &timing,
-                                encoding,
-                                layout_plan.channels,
-                                platform::now_ns(),
-                            )
-                            .map_err(|message| (EXIT_USAGE, message))?;
-                            let (fresh, ptp_mode) = start_session_with_ptp_fallback(
-                                &ring_cfg,
-                                local_ip,
-                                &timing,
-                                encoding,
-                                &layout_plan,
-                                &new_plan,
-                                self.ptp_mode,
-                            )
-                            .map_err(|message| (EXIT_USAGE, message))?;
-                            self.ptp_mode = ptp_mode;
-                            publish_sdp(&fresh, cfg, &new_plan, &self.shared);
-                            logln!(
+                                let (fresh, ptp_mode) = start_session_with_ptp_fallback(
+                                    &ring_cfg,
+                                    local_ip,
+                                    &timing,
+                                    encoding,
+                                    &layout_plan,
+                                    &new_plan,
+                                    self.ptp_mode,
+                                )
+                                .map_err(|message| (EXIT_USAGE, message))?;
+                                self.ptp_mode = ptp_mode;
+                                publish_sdp(&fresh, cfg, &new_plan, &self.shared);
+                                logln!(
                                 "TRUEHD layout actual={} target={} ch={} flows={} objects={} encoding={} ptime_us={} codec={}",
                                 layout_plan.output_layout,
                                 if layout_plan.target.is_empty() { "-" } else { &layout_plan.target },
@@ -1625,85 +1931,94 @@ impl Daemon {
                                 cfg.ptime_us,
                                 cfg.codec
                             );
-                            plan = new_plan;
-                            shape = Some(StreamShape {
-                                channels,
-                                source_channels: channels,
-                                map: layout_plan.map.clone(),
-                                layout: actual_id.clone(),
-                                rate: 48_000,
-                                fmt: SampleFmt::S16,
-                                stream_id: bits_meta.stream_id,
-                            });
-                            session = Some(fresh);
-                            first = 0;
-                        }
-                        let Some(active) = session.as_ref() else {
-                            continue;
-                        };
-                        let frames = block.frames.max(1);
-                        let mut chunk: Vec<f32> = Vec::with_capacity(frames * channels);
-                        for frame in 0..frames {
-                            let mut pcm = [0_i32; MAX_CH];
-                            for channel in 0..channels {
-                                let sample = block.channels[channel][frame].clamp(-1.0, 1.0);
-                                chunk.push(sample);
-                                pcm[channel] = (sample * 8_388_608.0)
-                                    .round()
-                                    .clamp(-8_388_608.0, 8_388_607.0)
-                                    as i32;
+                                plan = new_plan;
+                                shape = Some(StreamShape {
+                                    channels,
+                                    source_channels: channels,
+                                    map: layout_plan.map.clone(),
+                                    layout: actual_id.clone(),
+                                    rate: 48_000,
+                                    fmt: SampleFmt::S16,
+                                    stream_id: bits_meta.stream_id,
+                                });
+                                session = Some(fresh);
+                                first = 0;
                             }
-                            meter.add_frame(&pcm, channels);
-                        }
-                        // The pipeline decodes faster than real time (~2x on
-                        // armv7). When the AES67 ring is full, retry instead of
-                        // dropping the block: this back-pressures the FIFO read
-                        // loop, which is the product-level flow control.
-                        // Wait for ring space before submitting so the retry
-                        // path does not inflate the session "dropped" counter.
-                        let mut waited = 0u32;
-                        while active.ring_frames() + frames + 480 > ring_capacity && waited < 2_500 {
-                            std::thread::sleep(Duration::from_millis(2));
-                            waited += 1;
-                        }
-                        let mut rc = 0;
-                        let mut attempts = 0u32;
-                        loop {
-                            rc = unsafe {
-                                trimmod::submit_trimmed(active, trim.as_ref(), first, &mut chunk, frames, channels)
+                            let Some(active) = session.as_ref() else {
+                                continue;
                             };
-                            if rc != -7 || attempts >= 500 {
-                                break;
+                            let frames = block.frames.max(1);
+                            let mut chunk: Vec<f32> = Vec::with_capacity(frames * channels);
+                            for frame in 0..frames {
+                                let mut pcm = [0_i32; MAX_CH];
+                                for channel in 0..channels {
+                                    let sample = block.channels[channel][frame].clamp(-1.0, 1.0);
+                                    chunk.push(sample);
+                                    pcm[channel] = (sample * 8_388_608.0)
+                                        .round()
+                                        .clamp(-8_388_608.0, 8_388_607.0)
+                                        as i32;
+                                }
+                                meter.add_frame(&pcm, channels);
                             }
-                            attempts += 1;
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                        if rc != 0 {
-                            submit_errors += 1;
-                            if submit_errors <= 3 {
-                                logln!(
+                            // The pipeline decodes faster than real time (~2x on
+                            // armv7). When the AES67 ring is full, retry instead of
+                            // dropping the block: this back-pressures the FIFO read
+                            // loop, which is the product-level flow control.
+                            // Wait for ring space before submitting so the retry
+                            // path does not inflate the session "dropped" counter.
+                            let mut waited = 0u32;
+                            while active.ring_frames() + frames + 480 > ring_capacity
+                                && waited < 2_500
+                            {
+                                std::thread::sleep(Duration::from_millis(2));
+                                waited += 1;
+                            }
+                            let mut rc = 0;
+                            let mut attempts = 0u32;
+                            loop {
+                                rc = unsafe {
+                                    trimmod::submit_trimmed(
+                                        active,
+                                        trim.as_ref(),
+                                        first,
+                                        &mut chunk,
+                                        frames,
+                                        channels,
+                                    )
+                                };
+                                if rc != -7 || attempts >= 500 {
+                                    break;
+                                }
+                                attempts += 1;
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            if rc != 0 {
+                                submit_errors += 1;
+                                if submit_errors <= 3 {
+                                    logln!(
                                     "WARN TRUEHD submit code={rc} frames={frames} ch={channels} attempts={attempts}"
                                 );
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        if let Some(file) = dump_pcm_file.as_mut() {
-                            use std::io::Write as _;
-                            let mut bytes = Vec::with_capacity(chunk.len() * 3);
-                            for sample in &chunk {
-                                let value = (sample * 8_388_608.0)
-                                    .round()
-                                    .clamp(-8_388_608.0, 8_388_607.0)
-                                    as i32;
-                                let be = value.to_be_bytes();
-                                bytes.extend_from_slice(&be[1..4]);
+                            if let Some(file) = dump_pcm_file.as_mut() {
+                                use std::io::Write as _;
+                                let mut bytes = Vec::with_capacity(chunk.len() * 3);
+                                for sample in &chunk {
+                                    let value = (sample * 8_388_608.0)
+                                        .round()
+                                        .clamp(-8_388_608.0, 8_388_607.0)
+                                        as i32;
+                                    let be = value.to_be_bytes();
+                                    bytes.extend_from_slice(&be[1..4]);
+                                }
+                                let _ = file.write_all(&bytes);
                             }
-                            let _ = file.write_all(&bytes);
-                        }
-                        first += frames as u64;
-                        submitted += frames as u64;
-                        blocks_out += 1;
-                        frames_out += frames as u64;
+                            first += frames as u64;
+                            submitted += frames as u64;
+                            blocks_out += 1;
+                            frames_out += frames as u64;
                         }
                     }
                 }
@@ -1739,7 +2054,17 @@ impl Daemon {
                             dialnorm_db: pipeline.dialnorm_gain_db(),
                             _marker: std::marker::PhantomData,
                         };
-                        write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view), trim.as_ref());
+                        write_status(
+                            active,
+                            cfg,
+                            &plan,
+                            &parts,
+                            0,
+                            current,
+                            self.ptp_mode,
+                            Some(&bits_view),
+                            trim.as_ref(),
+                        );
                         meter.reset();
                         logln!(
                             "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={} limited={} out_peak={:.3} limiter_delay={} dialnorm={:.2}dB",
@@ -1772,16 +2097,16 @@ impl Daemon {
                             last_reopen_ns = now;
                             std::thread::sleep(Duration::from_millis(50));
                             match source::open(&cfg.bits) {
-                            Ok(fresh) => {
-                                bits_source = fresh;
-                                logln!("INFO live.bits EOF; reopened {}", cfg.bits);
-                            }
-                            Err(err) => {
-                                if !reopen_warned {
-                                    reopen_warned = true;
-                                    logln!("WARN live.bits reopen {} failed: {err}", cfg.bits);
+                                Ok(fresh) => {
+                                    bits_source = fresh;
+                                    logln!("INFO live.bits EOF; reopened {}", cfg.bits);
                                 }
-                            }
+                                Err(err) => {
+                                    if !reopen_warned {
+                                        reopen_warned = true;
+                                        logln!("WARN live.bits reopen {} failed: {err}", cfg.bits);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1821,7 +2146,17 @@ impl Daemon {
                 dialnorm_db: pipeline.dialnorm_gain_db(),
                 _marker: std::marker::PhantomData,
             };
-            write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view), trim.as_ref());
+            write_status(
+                active,
+                cfg,
+                &plan,
+                &parts,
+                0,
+                current,
+                self.ptp_mode,
+                Some(&bits_view),
+                trim.as_ref(),
+            );
         }
         push_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let p50 = percentile(&push_ms, 0.50);
@@ -1857,7 +2192,6 @@ impl Daemon {
         }
         loop_result.map(|_| EXIT_OK)
     }
-
 }
 
 fn push_percentiles(samples: &[f64]) -> (f64, f64) {
@@ -1874,6 +2208,7 @@ fn percentile(values: &[f64], q: f64) -> f64 {
     values[index]
 }
 
+#[derive(Clone)]
 struct StreamShape {
     /// Actual output channels after the layout intersection (what SDP/status
     /// report and what the RTP flows carry).
@@ -1887,6 +2222,43 @@ struct StreamShape {
     rate: u32,
     fmt: SampleFmt,
     stream_id: i64,
+}
+
+/// An AES67 session kept alive across idle/live transitions so switching a
+/// source never stops the RTP stream, releases the PTP lock (measured ~2 s on
+/// the Z9X) or flutters SAP. The next source reuses it when its wire shape
+/// (channels, ring map, output layout) matches.
+struct WarmSession {
+    session: Session,
+    plan: Vec<FlowPlan>,
+    channels: usize,
+    source_channels: usize,
+    map: Vec<usize>,
+    output_layout: String,
+    /// Next host frame index; the vendor ring anchors on it, so it must keep
+    /// advancing across source switches (idle silence also advances it).
+    first: u64,
+    ptp_mode: &'static str,
+}
+
+impl WarmSession {
+    fn matches_shape(&self, layout: &LayoutPlan) -> bool {
+        self.channels == layout.channels
+            && self.source_channels == layout.source_channels
+            && self.map == layout.map
+            && self.output_layout == layout.output_layout
+    }
+
+    fn matches_target(&self, layout_id: &str, channels: usize) -> bool {
+        self.output_layout == layout_id
+            && self.channels == channels
+            && self.source_channels == channels
+            && self
+                .map
+                .iter()
+                .enumerate()
+                .all(|(index, &source)| index == source)
+    }
 }
 
 /// Lightweight view for status snapshots.
@@ -2296,18 +2668,12 @@ fn rendered_layout_plan(target: &str, source_layout: &str, channels: usize) -> L
     }
 }
 
-fn make_resampler(
-    cfg: &Config,
-    rate: u32,
-    channels: usize,
-) -> Result<Box<dyn Resampler>, String> {
+fn make_resampler(cfg: &Config, rate: u32, channels: usize) -> Result<Box<dyn Resampler>, String> {
     if rate == crate::OUT_RATE {
         Ok(Box::new(Passthrough))
     } else {
         match cfg.resampler {
-            crate::config::ResamplerKind::Rubato => {
-                Ok(Box::new(RubatoResampler::new(channels)?))
-            }
+            crate::config::ResamplerKind::Rubato => Ok(Box::new(RubatoResampler::new(channels)?)),
             crate::config::ResamplerKind::CPoly => Ok(Box::new(PolyphaseResampler::new())),
         }
     }
@@ -2341,7 +2707,9 @@ pub fn plan_flows(
         }
         vec![(0, channels)]
     } else if cfg.no_split {
-        let cap = STANDARD_FLOW_CHANNELS.max(MAX_FLOW_CHANNELS).min(payload_cap);
+        let cap = STANDARD_FLOW_CHANNELS
+            .max(MAX_FLOW_CHANNELS)
+            .min(payload_cap);
         if channels > cap {
             return Err(format!(
                 "--no-split: {channels} channels x {payload_per_channel}B do not fit the 1440-byte AES67 payload budget (max {cap} channels in one flow); \
@@ -2360,9 +2728,7 @@ use standard multi-flow packing (drop --no-split) instead"
         }
         groups
     };
-    let base_ssrc = cfg
-        .ssrc
-        .unwrap_or_else(|| 0x4E53_5034 ^ (now_ns as u32));
+    let base_ssrc = cfg.ssrc.unwrap_or_else(|| 0x4E53_5034 ^ (now_ns as u32));
     groups
         .iter()
         .enumerate()
@@ -2413,14 +2779,8 @@ fn start_session_with_ptp_fallback(
     let attempt = |master: Option<Ipv4Addr>| -> Result<Session, String> {
         let mut candidate = cfg.clone();
         candidate.ptp_master = master;
-        let config = build_session_config_for(
-            &candidate,
-            local_ip,
-            timing,
-            encoding,
-            layout,
-            plan,
-        )?;
+        let config =
+            build_session_config_for(&candidate, local_ip, timing, encoding, layout, plan)?;
         let session = Session::default();
         let rc = session.configure(config);
         if rc != 0 {
@@ -2463,9 +2823,7 @@ fn start_session_with_ptp_fallback(
             );
             attempt(None)
                 .map(|session| (session, "multicast"))
-                .map_err(|fallback| {
-                    format!("{err}; multicast fallback also failed: {fallback}")
-                })
+                .map_err(|fallback| format!("{err}; multicast fallback also failed: {fallback}"))
         }
     }
 }
@@ -2970,7 +3328,8 @@ fn write_status(
         bits,
     };
     status::publish(&snapshot);
-    let _ = parts.submitted;}
+    let _ = parts.submitted;
+}
 #[cfg(test)]
 mod pcm_render_tests {
     use super::*;
@@ -3010,10 +3369,9 @@ mod pcm_render_tests {
         for index in 0..480usize {
             frame = [0_i32; MAX_CH];
             for (channel, &amp) in amps.iter().enumerate() {
-                let w = 2.0 * std::f32::consts::PI
-                    * (300.0 + 100.0 * channel as f32)
-                    * index as f32
-                    / crate::OUT_RATE as f32;
+                let w =
+                    2.0 * std::f32::consts::PI * (300.0 + 100.0 * channel as f32) * index as f32
+                        / crate::OUT_RATE as f32;
                 frame[channel] = (amp * w.sin() * 8_388_608.0) as i32;
             }
             stage.push(&frame, 8, &mut meter, &mut submitter);
@@ -3129,7 +3487,10 @@ mod source_drain_tests {
         let mut source = crate::source::open(path.to_str().unwrap()).unwrap();
         {
             use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             file.write_all(&[0x5a_u8; 4096]).unwrap();
             file.flush().unwrap();
         }
@@ -3146,5 +3507,3 @@ mod source_drain_tests {
         let _ = std::fs::remove_file(&path);
     }
 }
-
-

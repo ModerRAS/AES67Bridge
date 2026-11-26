@@ -82,18 +82,14 @@ pub fn layout_labels(layout: &str) -> Option<&'static [&'static str]> {
         "5.1" => &["L", "R", "C", "LFE", "Ls", "Rs"][..],
         "5.1.2" => &["L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr"][..],
         "7.1" => &["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"][..],
-        "7.1.2" => &[
-            "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr",
-        ][..],
-        "5.1.4" => &[
-            "L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr",
-        ][..],
+        "7.1.2" => &["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr"][..],
+        "5.1.4" => &["L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr"][..],
         "7.1.4" => &[
             "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr",
         ][..],
         "9.1.6" => &[
-            "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Lw", "Rw", "Tfl", "Tfr", "Tbl",
-            "Tbr", "Tsl", "Tsr",
+            "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Lw", "Rw", "Tfl", "Tfr", "Tbl", "Tbr",
+            "Tsl", "Tsr",
         ][..],
         _ => return None,
     })
@@ -200,7 +196,9 @@ pub fn plan_layout(
             output_layout: inferred.to_string(),
             source_channels,
             channels: source_channels,
-            labels: (0..source_channels).map(|c| format!("CH{}", c + 1)).collect(),
+            labels: (0..source_channels)
+                .map(|c| format!("CH{}", c + 1))
+                .collect(),
             map: (0..source_channels).collect(),
             missing: Vec::new(),
             dropped: Vec::new(),
@@ -220,11 +218,18 @@ pub fn plan_layout(
         // Source layout unknown: fall back to the first N target channels and
         // report a "custom" layout, so no channel is invented.
         let keep = source_channels.min(target_labels.len());
-        let labels: Vec<String> = target_labels[..keep].iter().map(|s| s.to_string()).collect();
-        let output_layout = layout_for_labels(&labels.iter().map(String::as_str).collect::<Vec<_>>())
-            .unwrap_or("custom")
-            .to_string();
-        let missing: Vec<String> = target_labels[keep..].iter().map(|s| s.to_string()).collect();
+        let labels: Vec<String> = target_labels[..keep]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let output_layout =
+            layout_for_labels(&labels.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or("custom")
+                .to_string();
+        let missing: Vec<String> = target_labels[keep..]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut dropped = Vec::new();
         if source_channels > target_labels.len() {
             for extra in target_labels.len()..source_channels {
@@ -265,7 +270,9 @@ pub fn plan_layout(
         .map(|s| s.to_string())
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let output_layout = layout_for_labels(&label_refs).unwrap_or("custom").to_string();
+    let output_layout = layout_for_labels(&label_refs)
+        .unwrap_or("custom")
+        .to_string();
     Ok(LayoutPlan {
         target,
         source: source_name.to_string(),
@@ -445,7 +452,7 @@ impl Default for Config {
             no_split: false,
             legacy_split: false,
             buffer_ms: 100,
-        auto_idle_ms: 0,
+            auto_idle_ms: 0,
             prebuffer_ms: 20,
             local_ip: None,
             resampler: ResamplerKind::Rubato,
@@ -566,9 +573,13 @@ impl Config {
         if self.port == 0 {
             return Err(format!("--port {}", self.port));
         }
-        if !matches!(self.ptime_us, 125 | 250 | 500 | 1000) {
+        // AES67-2023 Table 2 names 125 us, 250 us, 1 ms and 4 ms; 500 us and
+        // 2 ms are additional packet times permitted by sec 7.2.2. ST 2110-30
+        // only allows 125 us (Level B) and 1 ms (Level A), so 2/4 ms are
+        // AES67-only and the UI labels them accordingly.
+        if !matches!(self.ptime_us, 125 | 250 | 500 | 1_000 | 2_000 | 4_000) {
             return Err(format!(
-                "unsupported --ptime-us {} (allowed 125/250/500/1000)",
+                "unsupported --ptime-us {} (allowed 125/250/500/1000/2000/4000)",
                 self.ptime_us
             ));
         }
@@ -576,7 +587,10 @@ impl Config {
             return Err(format!("invalid --mtu {}", self.mtu));
         }
         if self.buffer_ms < 8 || self.buffer_ms > 1024 {
-            return Err(format!("--buffer-ms {} out of range 8..1024", self.buffer_ms));
+            return Err(format!(
+                "--buffer-ms {} out of range 8..1024",
+                self.buffer_ms
+            ));
         }
         if self.prebuffer_ms > self.buffer_ms {
             return Err(format!(
@@ -584,7 +598,8 @@ impl Config {
                 self.prebuffer_ms, self.buffer_ms
             ));
         }
-        if self.frames_pkt() < 1 || self.frames_pkt() > 48 {
+        // 48 kHz output: 4 ms = 192 samples per packet (AES67 Table 2)
+        if self.frames_pkt() < 1 || self.frames_pkt() > 192 {
             return Err("ptime too large".to_string());
         }
         if platform::parse_ipv4(&self.group).is_none() {
@@ -959,7 +974,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             }
             "--buffer-ms" => {
                 cfg.auto_idle_ms = next(&mut index, args)?.parse().unwrap_or(0);
-        cfg.buffer_ms = next(&mut index, args)?.parse().unwrap_or(100);
+                cfg.buffer_ms = next(&mut index, args)?.parse().unwrap_or(100);
             }
             "--prebuffer-ms" => {
                 cfg.prebuffer_ms = next(&mut index, args)?.parse().unwrap_or(10);
@@ -1050,9 +1065,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             "--ssrc" => {
                 let value = next(&mut index, args)?;
                 let hex = value.trim_start_matches("0x").trim_start_matches("0X");
-                cfg.ssrc = Some(
-                    u32::from_str_radix(hex, 16).map_err(|_| "--ssrc HEX".to_string())?,
-                );
+                cfg.ssrc =
+                    Some(u32::from_str_radix(hex, 16).map_err(|_| "--ssrc HEX".to_string())?);
             }
             "--log" => cfg.log = Some(next(&mut index, args)?),
             other => return Err(format!("unknown argument '{other}' (try --help)")),
@@ -1072,7 +1086,11 @@ mod tests {
         ("2.0", 2, &["L", "R"]),
         ("4.1.2", 7, &["L", "R", "LFE", "Ls", "Rs", "Tfl", "Tfr"]),
         ("5.1", 6, &["L", "R", "C", "LFE", "Ls", "Rs"]),
-        ("5.1.2", 8, &["L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr"]),
+        (
+            "5.1.2",
+            8,
+            &["L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr"],
+        ),
         ("7.1", 8, &["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"]),
         (
             "7.1.2",
@@ -1095,8 +1113,8 @@ mod tests {
             "9.1.6",
             16,
             &[
-                "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Lw", "Rw", "Tfl", "Tfr",
-                "Tbl", "Tbr", "Tsl", "Tsr",
+                "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Lw", "Rw", "Tfl", "Tfr", "Tbl",
+                "Tbr", "Tsl", "Tsr",
             ],
         ),
     ];
@@ -1155,7 +1173,10 @@ mod tests {
         assert_eq!(cfg.maxch, 8, "layout wins over maxch=6");
         assert!(!cfg.notes.is_empty());
         assert_eq!(cfg.encoding, Encoding::L16, "codec=l16");
-        assert!(cfg.legacy_split && !cfg.no_split, "split=0 is legacy RTP fragmentation");
+        assert!(
+            cfg.legacy_split && !cfg.no_split,
+            "split=0 is legacy RTP fragmentation"
+        );
         assert_eq!(cfg.ptp_master, Some(Ipv4Addr::new(192, 168, 1, 10)));
         assert_eq!(cfg.ptp_domain, Some(24));
         assert_eq!(cfg.effective_ptp_domain(), 24);
@@ -1174,9 +1195,15 @@ mod tests {
     fn split_conf_selects_standard_or_legacy_wire_mode() {
         let mut cfg = Config::default();
         apply_key_value(&mut cfg, "split", "1", "test").unwrap();
-        assert!(!cfg.no_split && !cfg.legacy_split, "split=1 is standard multi-flow");
+        assert!(
+            !cfg.no_split && !cfg.legacy_split,
+            "split=1 is standard multi-flow"
+        );
         apply_key_value(&mut cfg, "split", "0", "test").unwrap();
-        assert!(cfg.legacy_split && !cfg.no_split, "split=0 is legacy RTP fragmentation");
+        assert!(
+            cfg.legacy_split && !cfg.no_split,
+            "split=0 is legacy RTP fragmentation"
+        );
     }
 
     fn strings(values: &[String]) -> Vec<&str> {
