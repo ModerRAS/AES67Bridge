@@ -56,9 +56,10 @@ class MainActivity : ComponentActivity() {
     private fun recoverRuntimeIfNeeded() {
         try {
             if (!File("/data/aes67bridge.persist/enabled").exists()) return
+            // Only recover an *empty* runtime (boot hook had no app data). A state.txt
+            // that says "stopped" is a user decision and must not be overridden.
             val state = File("/data/aes67bridge/state.txt")
-            val running = state.exists() && state.readText().trim() == "running"
-            if (!running) AutoStartService.request(applicationContext, "ENABLE")
+            if (!state.exists()) AutoStartService.request(applicationContext, "ENABLE")
         } catch (_: Throwable) {
             // not fatal: the user can press "启动" in the UI
         }

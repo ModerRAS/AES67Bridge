@@ -65,8 +65,11 @@ chmod 0755 "$STAGE"/*.sh "$STAGE"/*.so "$STAGE"/*.orig 2>/dev/null
 # 4) runtime flag before the HAL restarts so the tee opens the FIFOs on the new tmpfs
 touch "$ROOT/live.enable"
 chmod 0644 "$ROOT/live.enable"
-if [ "$fresh" = "1" ]; then
-    echo "fresh tmpfs runtime: restarting vendor audio HAL so the tee opens the new FIFOs"
+if [ "$fresh" = "1" ] && grep -q " /vendor/lib/hw overlay" /proc/mounts; then
+    # Switching to tmpfs while the HAL already has the tee loaded: restart it so the
+    # tee opens the new FIFOs. At boot the overlay is not mounted yet and bootstrap
+    # mounts it + restarts the HAL anyway, so no double restart there.
+    echo "fresh tmpfs runtime with HAL already loaded: restarting vendor audio HAL"
     setprop ctl.restart vendor.audio-hal
     sleep 3
 fi
