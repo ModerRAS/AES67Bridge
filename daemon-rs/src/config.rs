@@ -340,6 +340,10 @@ pub struct Config {
     /// Default false: AES67 standard multi-flow packing (<= 8ch per flow).
     pub legacy_split: bool,
     pub buffer_ms: usize,
+    /// Release an idle RTP session after this many ms of source silence.
+    /// 0 = never release once the session is up (silence keeps flowing instead of
+    /// paying a session restart / PTP re-lock gap on every source hiccup).
+    pub auto_idle_ms: u64,
     pub prebuffer_ms: usize,
     pub local_ip: Option<Ipv4Addr>,
     pub resampler: ResamplerKind,
@@ -397,6 +401,7 @@ impl Default for Config {
             no_split: false,
             legacy_split: false,
             buffer_ms: 100,
+        auto_idle_ms: 0,
             prebuffer_ms: 20,
             local_ip: None,
             resampler: ResamplerKind::Rubato,
@@ -549,7 +554,7 @@ impl Config {
 [--layout-mode strict] [--pcm-render 1|0] [--dialnorm 1|0] [--gain-db X] [--limiter-db X] \
 [--bits-meta /data/haltee/live.bits.meta] \
 [--codec pcm|bits|auto|eac3|truehd|l16] [--encoding l24|l16] [--pt N] [--mtu 1500] [--target-layout L] \
-[--split] [--no-split] [--legacy-split] [--buffer-ms 100] [--prebuffer-ms 20] \
+[--split] [--no-split] [--legacy-split] [--buffer-ms 100] [--prebuffer-ms 20] [--auto-idle-ms 0] \
 [--ch N] [--rate R] \
 [--local-ip IP|auto] [--resampler rubato|c-poly] [--sap] [--sap-interval S] [--http-port P] \
 [--source-filter] [--labels L,R,...] [--channel-map 0,1,...] \
@@ -640,6 +645,11 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
                 .map_err(|_| format!("{origin}: bad mtu '{value}'"))?
         }
         "legacy_split" => cfg.legacy_split = parse_bool(value),
+        "auto_idle_ms" => {
+            cfg.auto_idle_ms = value
+                .parse()
+                .map_err(|_| format!("{origin}: bad auto_idle_ms '{value}'"))?
+        }
         "buffer_ms" => {
             cfg.buffer_ms = value
                 .parse()
@@ -859,7 +869,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
                 cfg.mtu = next(&mut index, args)?.parse().unwrap_or(0);
             }
             "--buffer-ms" => {
-                cfg.buffer_ms = next(&mut index, args)?.parse().unwrap_or(100);
+                cfg.auto_idle_ms = next(&mut index, args)?.parse().unwrap_or(0);
+        cfg.buffer_ms = next(&mut index, args)?.parse().unwrap_or(100);
             }
             "--prebuffer-ms" => {
                 cfg.prebuffer_ms = next(&mut index, args)?.parse().unwrap_or(10);

@@ -463,6 +463,9 @@ impl Daemon {
         let mut reads: u64 = 0;
         let mut eofs: u64 = 0;
         let mut last_data_ns = platform::now_ns();
+        // Audible-silence diagnostics: log when the HAL tee stops writing and when it resumes.
+        let mut silent_since_ns: i64 = 0;
+        let mut silent_warned = false;
         let mut fifo_last = 0usize;
         let mut fifo_max = 0usize;
         let mut maxch_warned = false;
@@ -484,8 +487,8 @@ impl Daemon {
                     logln!("AUTO switch: live.bits became the live source; releasing the PCM session");
                     break;
                 }
-                if auto && session.is_some() && source_idle(last_data_ns) {
-                    logln!("AUTO idle: no live.pcm bytes for {} ms; releasing the PCM session", AUTO_IDLE_MS);
+                if auto && session.is_some() && source_idle(last_data_ns, cfg.auto_idle_ms) {
+                    logln!("AUTO idle: no live.pcm bytes for {} ms; releasing the PCM session", cfg.auto_idle_ms);
                     break;
                 }
                 let now = platform::now_ns();
@@ -730,6 +733,16 @@ impl Daemon {
                         None,
                     );
                     meter.reset();
+                }
+                let gap_ms = age_ms(last_data_ns);
+                if gap_ms > 500 && !silent_warned {
+                    silent_warned = true;
+                    silent_since_ns = now;
+                    logln!("WARN PCM source silent for {} ms (HAL tee stopped writing live.pcm; sending silence)", gap_ms);
+                } else if gap_ms < 50 && silent_warned {
+                    silent_warned = false;
+                    let ms = if silent_since_ns > 0 { (now - silent_since_ns) / 1_000_000 } else { 0 };
+                    logln!("PCM source resumed after {} ms of silence", ms);
                 }
                 if now - last_stat_ns > 10_000_000_000 {
                     last_stat_ns = now;
@@ -1115,7 +1128,7 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
-                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns)) {
+                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms)) {
                     logln!("AUTO switch: live.bits went quiet; releasing the bits session");
                     break;
                 }
@@ -1364,7 +1377,7 @@ impl Daemon {
                 if platform::stop_requested() {
                     break;
                 }
-                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns)) {
+                if auto && !bits_stream_active(cfg) && (pcm_stream_active(cfg) || source_idle(last_data_ns, cfg.auto_idle_ms)) {
                     logln!("AUTO switch: live.bits went quiet; releasing the bits session");
                     break;
                 }
@@ -2531,8 +2544,6 @@ enum AutoSource {
 
 /// How long a session is kept after its live source goes quiet. AES67 streams are
 /// continuous, so a pause keeps sending silence; only a longer gap releases the
-/// session (resuming then costs one session rebuild, not another PTP retry).
-const AUTO_IDLE_MS: u64 = 20_000;
 
 fn file_fresh_ms(path: &str, max_ms: u64) -> bool {
     std::fs::metadata(path)
@@ -2565,8 +2576,8 @@ fn pcm_stream_active(cfg: &Config) -> bool {
     state.valid && (state.rate == 44_100 || state.rate == 48_000)
 }
 
-fn source_idle(last_data_ns: i64) -> bool {
-    age_ms(last_data_ns) >= AUTO_IDLE_MS
+fn source_idle(last_data_ns: i64, auto_idle_ms: u64) -> bool {
+    auto_idle_ms > 0 && age_ms(last_data_ns) >= auto_idle_ms
 }
 
 fn auto_source(cfg: &Config) -> AutoSource {

@@ -71,7 +71,7 @@ internal val ConfDefault = mapOf(
     "proto" to "aes67", "group" to "239.69.67.1", "port" to "5004",
     "ptime_us" to "1000", "codec" to "pcm", "layout" to "7.1",
     "split" to "1", "sap" to "1", "gain_db" to "0", "limiter_db" to "-1",
-    "hal_buf" to "20", "fifo_kb" to "32", "ptp" to "0",
+    "hal_buf" to "20", "fifo_kb" to "32", "auto_idle_ms" to "0", "ptp" to "0",
     "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0", "pt" to "",
     "http_port" to "8080",
     "pcm_export" to "1", "bits_export" to "1", "boot" to "1",
