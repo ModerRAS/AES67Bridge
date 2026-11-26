@@ -30,6 +30,14 @@ path = "src/bin/dump_src.rs"
 name = "aes67-compliance"
 path = "src/bin/compliance.rs"
 
+[[bin]]
+name = "aes67-ctl"
+path = "src/bin/ctl.rs"
+
+[[bin]]
+name = "aes67-keyinject"
+path = "src/bin/keyinject.rs"
+
 # Test-only PTP leader used to verify the follower against the ST 2059-2 values
 # when no broadcast grandmaster is reachable. Not part of the product path.
 [[bin]]
