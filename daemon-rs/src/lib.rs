@@ -46,3 +46,5 @@ pub const DEFAULT_LOCK: &str = "/data/local/tmp/aes67-daemon.lock";
 pub const DEFAULT_MTU: usize = 1500;
 /// AES67 RTP payload budget (AES67-2023: 1440 bytes incl. nothing but media).
 pub const MAX_RTP_PAYLOAD: usize = 1440;
+/// Local IPv4 advertised in status.json (set when the first RTP session starts).
+pub static LOCAL_IP: std::sync::OnceLock<std::net::Ipv4Addr> = std::sync::OnceLock::new();

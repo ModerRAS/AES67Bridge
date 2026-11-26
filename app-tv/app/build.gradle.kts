@@ -1,4 +1,4 @@
-﻿plugins {
+plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -21,8 +21,8 @@ android {
         applicationId = "dev.aes67bridge.tv"
         minSdk = 30
         targetSdk = 30
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
     }
     signingConfigs {
         if (keystoreProps.isNotEmpty()) {

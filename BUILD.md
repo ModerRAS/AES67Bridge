@@ -81,7 +81,7 @@ proxy over `/vendor/lib/hw`, provisions the stock HAL backup when needed, and
 - `.github/workflows/release.yml`: on tag `v*` builds the same artifacts,
   writes `release/latest.json` (versionCode/versionName/url/sha256 for APK and
   daemon), publishes a GitHub Release and commits `latest.json` back to `main`.
-- The TV app checks `https://raw.githubusercontent.com/ModerRAS/AES67Bridge/main/release/latest.json`
+- The TV app has a manual "检查更新 / 更新 vX" button on the home screen (auto-install is **off by default**; "check on start" only notifies). It checks `https://raw.githubusercontent.com/ModerRAS/AES67Bridge/main/release/latest.json`
   (fixed path, no GitHub API rate limit), verifies SHA256 and installs APK + daemon
   through the firmware's root command bridge (`zidoo.root.cmd2` + `zd_root_cmd.sh`).
 

@@ -20,7 +20,7 @@ Zidoo Z9X 8K → AES67 音频桥（研究项目，源码 only）。
 
 - **CI**（`.github/workflows/ci.yml`）：push/PR 时跑 Rust 测试 + armv7 daemon 构建 + Android APK 构建。
 - **CD**（`.github/workflows/release.yml`）：推 `v*` tag 时自动构建 daemon/代理/APK，生成 SHA256 与 `release/latest.json`，发布 GitHub Release 并把 `latest.json` 提交回 `main`。
-- **自动更新**：App 内「设置 → 更新」检查 `https://raw.githubusercontent.com/ModerRAS/AES67Bridge/main/release/latest.json`（固定路径 JSON，不走 GitHub API 限额），下载后校验 SHA256；芝杜有 root，APK 与 daemon 二进制都通过固件的 root 命令桥静默安装并重启，无需人工点装。
+- **更新（手动按钮）**：主界面有「检查更新 / 更新 vX」按钮，默认**不会**遇到新版就自动安装；设置页可开「启动检查」（默认开，只提示）和「自动安装」（默认关）。检查 `https://raw.githubusercontent.com/ModerRAS/AES67Bridge/main/release/latest.json`（固定路径 JSON，不走 GitHub API 限额），下载后校验 SHA256；芝杜有 root，APK 与 daemon 二进制都通过固件的 root 命令桥静默安装并重启，无需人工点装。
 
 ## License
 

@@ -35,7 +35,8 @@ object UpdateManager {
 
     private const val PREFS = "updater"
     private const val KEY_LAST_CHECK = "last_check_ms"
-    private const val KEY_AUTO = "auto_update"
+    private const val KEY_AUTO_CHECK = "auto_check"
+    private const val KEY_AUTO_INSTALL = "auto_install"
     private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
     data class Release(
@@ -64,13 +65,24 @@ object UpdateManager {
 
     fun updateUrl(): String = LATEST_JSON_URL
 
-    fun autoUpdateEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO, true)
+    /** Check for updates on app start (default on; never installs by itself). */
+    fun autoCheckEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO_CHECK, true)
 
-    fun setAutoUpdate(context: Context, enabled: Boolean) {
+    fun setAutoCheckEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_AUTO, enabled).apply()
-        status = if (enabled) "自动更新：开" else "自动更新：关"
+            .putBoolean(KEY_AUTO_CHECK, enabled).apply()
+        status = if (enabled) "启动时检查：开" else "启动时检查：关"
+    }
+
+    /** Silent install without asking (default OFF: updates are a button press). */
+    fun autoInstallEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO_INSTALL, false)
+
+    fun setAutoInstallEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AUTO_INSTALL, enabled).apply()
+        status = if (enabled) "自动安装：开（下载后静默安装）" else "自动安装：关（需手动点更新）"
     }
 
     fun currentVersionName(): String = BuildConfig.VERSION_NAME
@@ -78,8 +90,13 @@ object UpdateManager {
 
     fun isNewer(release: Release): Boolean = release.versionCode > BuildConfig.VERSION_CODE
 
-    /** Called once per app start; respects the 6 h cooldown and the auto-update preference. */
+    /**
+     * Called once per app start. Only checks by default (a newer release shows up as the
+     * "更新 vX" button on the console); silent install happens only when the user
+     * explicitly enabled auto-install in settings.
+     */
     suspend fun autoCheck(context: Context) {
+        if (!autoCheckEnabled(context)) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         if (now - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) {
@@ -90,11 +107,11 @@ object UpdateManager {
         check(context)
         val release = available ?: return
         if (!isNewer(release)) return
-        if (!autoUpdateEnabled(context)) {
-            status = "发现新版本 v" + release.versionName + "（自动更新已关）"
+        if (!autoInstallEnabled(context)) {
+            status = "发现新版本 v" + release.versionName + "，点主界面「更新」按钮安装"
             return
         }
-        status = "发现新版本 v" + release.versionName + "，自动更新中…"
+        status = "发现新版本 v" + release.versionName + "，自动安装中…"
         try {
             applyUpdate(context, release)
         } catch (t: Throwable) {

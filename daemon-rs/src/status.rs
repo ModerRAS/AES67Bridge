@@ -90,12 +90,13 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     let mut out = String::with_capacity(1024);
     let _ = write!(
         out,
-        "{{\"ts\":{},\"version\":\"{}\",\"mode\":\"{}\",\"hal\":\"running\",\"group\":\"{}\",\"port\":{},\"maxch\":{},\"layout\":\"{}\",\"codec\":\"{}\",\"flows\":{},\"split_mode\":\"{}\",",
+        "{{\"ts\":{},\"version\":\"{}\",\"mode\":\"{}\",\"hal\":\"running\",\"group\":\"{}\",\"port\":{},\"local_ip\":\"{}\",\"maxch\":{},\"layout\":\"{}\",\"codec\":\"{}\",\"flows\":{},\"split_mode\":\"{}\",",
         platform::realtime_ms(),
         env!("CARGO_PKG_VERSION"),
         snapshot.mode,
         snapshot.group,
         snapshot.port,
+        crate::LOCAL_IP.get().map(|ip| ip.to_string()).unwrap_or_default(),
         snapshot.maxch,
         snapshot.layout,
         snapshot.codec,

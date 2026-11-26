@@ -289,7 +289,8 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     val srcRate = remember { srcSt.rate.takeIf { it.isNotEmpty() } }
 
     val scope = rememberCoroutineScope()
-    var autoUpdateOn by remember { mutableStateOf(UpdateManager.autoUpdateEnabled(ctx)) }
+    var autoCheckOn by remember { mutableStateOf(UpdateManager.autoCheckEnabled(ctx)) }
+    var autoInstallOn by remember { mutableStateOf(UpdateManager.autoInstallEnabled(ctx)) }
     var page by remember { mutableStateOf(0) }
     var gAddr by remember { mutableStateOf("") }
     var gPort by remember { mutableStateOf("") }
@@ -518,17 +519,28 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                             }
                             if (cat == 3) {
                                 Hint("") // separator
-                                RowLabel("自动更新") {
-                                    OptChip("开", selected = autoUpdateOn) {
-                                        autoUpdateOn = true
-                                        UpdateManager.setAutoUpdate(ctx, true)
+                                RowLabel("启动检查") {
+                                    OptChip("开", selected = autoCheckOn) {
+                                        autoCheckOn = true
+                                        UpdateManager.setAutoCheckEnabled(ctx, true)
                                     }
-                                    OptChip("关", selected = !autoUpdateOn) {
-                                        autoUpdateOn = false
-                                        UpdateManager.setAutoUpdate(ctx, false)
+                                    OptChip("关", selected = !autoCheckOn) {
+                                        autoCheckOn = false
+                                        UpdateManager.setAutoCheckEnabled(ctx, false)
                                     }
                                 }
-                                Hint("开：每次启动最多 6 小时检查一次 release/latest.json，有新版本自动静默安装（APK + 守护）；关：只手动检查")
+                                Hint("开：每次启动最多 6 小时查一次版本，只提示「有新版本」，不会自己安装")
+                                RowLabel("自动安装") {
+                                    OptChip("关（推荐）", selected = !autoInstallOn) {
+                                        autoInstallOn = false
+                                        UpdateManager.setAutoInstallEnabled(ctx, false)
+                                    }
+                                    OptChip("开", selected = autoInstallOn) {
+                                        autoInstallOn = true
+                                        UpdateManager.setAutoInstallEnabled(ctx, true)
+                                    }
+                                }
+                                Hint("默认关：发现新版只在主界面出现「更新 vX」按钮，点了才下载安装；开：静默自动装（APK + 守护，会短暂中断）")
                                 RowLabel("版本") {
                                     Text(
                                         "App v" + UpdateManager.currentVersionName() +

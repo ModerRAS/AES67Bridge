@@ -30,6 +30,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.tv.material3.Button
 import androidx.tv.material3.Text as TvText
 import dev.aes67bridge.tv.AutoStartService
+import dev.aes67bridge.tv.UpdateManager
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -48,6 +50,7 @@ fun ConsoleScreen() {
     var conf by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showSettings by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     LaunchedEffect(Unit) {
         while (true) {
@@ -116,6 +119,13 @@ fun ConsoleScreen() {
             )
             InfoCard("RTP 输出", nz(st.packets) + " 包", "err " + nz(st.err) + " · " + nz(st.dest), Modifier.weight(1f))
         }
+        val sdpPort = (conf["http_port"] ?: "8080").ifEmpty { "8080" }
+        if (sdpPort != "0" && st.localIp.isNotEmpty()) {
+            Text(
+                "SDP 拉取：http://" + st.localIp + ":" + sdpPort + "/aes67.sdp · SAP 自动公告 224.2.127.254:9875",
+                color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)
+            )
+        }
         if (outCh > 8 && (st.codec.isEmpty() || st.codec == "pcm")) {
             Text(
                 "⚠ 布局 " + layout + " 需要 " + outCh + "ch，但实测 HAL PCM 上限只有 8ch：PCM 路径会丢声道或拒播；" +
@@ -175,6 +185,21 @@ fun ConsoleScreen() {
             TvButton("刷新") {
                 st = readStatus(); stateText = readState(); conf = readConf(ctx)
             }
+            val rel = UpdateManager.available
+            val hasUpdate = rel != null && UpdateManager.isNewer(rel)
+            TvButton(
+                if (UpdateManager.busy) "更新中…" else if (hasUpdate) "更新 v" + rel!!.versionName else "检查更新",
+                enabled = !UpdateManager.busy
+            ) {
+                scope.launch {
+                    val current = UpdateManager.available
+                    if (current != null && UpdateManager.isNewer(current)) {
+                        UpdateManager.applyUpdate(ctx, current)
+                    } else {
+                        UpdateManager.check(ctx)
+                    }
+                }
+            }
             TvButton("回滚原厂 HAL") { pending = "rollback"; send("ROLLBACK") }
         }
         if (showSettings) {
@@ -203,6 +228,9 @@ fun ConsoleScreen() {
                     "）：守护可能没起来，按「启动」或看 /data/aes67bridge/logs/daemon.log",
                 color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
             )
+        }
+        if (UpdateManager.status.isNotEmpty()) {
+            Text(UpdateManager.status, color = if (UpdateManager.available?.let { UpdateManager.isNewer(it) } == true) Accent else Dim, fontSize = 12.sp)
         }
         Spacer(Modifier.height(10.dp))
         Text(

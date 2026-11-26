@@ -2229,6 +2229,7 @@ fn start_session_with_ptp_fallback(
     plan: &[FlowPlan],
     hint: &str,
 ) -> Result<(Session, &'static str), String> {
+    let _ = crate::LOCAL_IP.get_or_init(|| local_ip);
     let attempt = |master: Option<Ipv4Addr>| -> Result<Session, String> {
         let mut candidate = cfg.clone();
         candidate.ptp_master = master;
