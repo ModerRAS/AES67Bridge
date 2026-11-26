@@ -503,6 +503,58 @@ mod tests {
     }
 
     #[test]
+    fn channel_order_covers_every_bridge_layout() {
+        // Every layout the daemon/UI can configure (daemon-rs/src/config.rs).
+        let cases: &[(&[&str], &str)] = &[
+            (&["L", "R"], "ST"),
+            (&["FL", "FR"], "ST"),
+            (&["L", "R", "C", "LFE", "Ls", "Rs"], "51"),
+            (&["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"], "71"),
+            // 4.1.2 has no ST 2110 soundfield group; the L/R pair is ST and the
+            // remaining five channels are Undefined.
+            (&["L", "R", "LFE", "Ls", "Rs", "Tfl", "Tfr"], "ST,U05"),
+            (&["L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr"], "51,U02"),
+            (
+                &["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr"],
+                "71,U02",
+            ),
+            (
+                &[
+                    "L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr",
+                ],
+                "51,U04",
+            ),
+            (
+                &[
+                    "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr",
+                ],
+                "71,U04",
+            ),
+            (
+                &[
+                    "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Lw", "Rw", "Tfl", "Tfr",
+                    "Tbl", "Tbr", "Tsl", "Tsr",
+                ],
+                "71,U08",
+            ),
+        ];
+        for (labels, expected) in cases {
+            let labels: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                channel_order(&labels).as_deref(),
+                Some(*expected),
+                "{labels:?}"
+            );
+        }
+        // Standard multi-flow packing of a >8ch layout: every flow is described
+        // on its own, so a 10ch 7.1.2 stream becomes (71) + (U02).
+        assert_eq!(
+            channel_order(&["Tfl".to_owned(), "Tfr".to_owned()]).as_deref(),
+            Some("U02")
+        );
+    }
+
+    #[test]
     fn sap_hash_is_a_crc16_of_the_current_description() {
         assert_eq!(crc16(b"123456789"), 0x29B1);
         assert_eq!(crc16(b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\n"), 0xF2FF);

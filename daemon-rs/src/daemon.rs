@@ -196,6 +196,12 @@ impl Daemon {
             cfg.effective_ptp_domain(),
             cfg.sap
         );
+        if cfg.ptime_us < 500 {
+            logln!(
+                "WARN ptime_us={} is experimental on Android (short packet times need a busy-spin pacer and still lose slots); the supported ST 2110-30 level is A (1 ms = 1000 us)",
+                cfg.ptime_us
+            );
+        }
         if cfg.pt != 0 {
             let expected = if cfg.encoding == Encoding::L24 { 97 } else { 96 };
             if cfg.pt != expected {

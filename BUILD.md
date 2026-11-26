@@ -80,15 +80,33 @@ the missing ST 2110-30 profile pieces:
   - An explicit `ptp_domain=` always wins over the profile default. SDP
     `a=clock-domain:PTPv2 <domain>` and
     `a=ts-refclk:ptp=IEEE1588-2008:<GMID>:<domain>` follow it.
-- `a=fmtp:<pt> channel-order=SMPTE2110.(...)` is derived from the flow's channel
-  labels: 2.0 → `(ST)`, 5.1 → `(51)`, 7.1 → `(71)`, 5.1.2 → `(51,U02)`,
-  7.1.4 → `(71,U04)`; unmatched runs become Undefined groups (`U<nn>`).
-- `ptime_us=125` is the ST 2110-30 Level B packet time (48 kHz, 1–8 ch).
-  On Android, sleep-based pacing at 125 µs drops slots (measured p99 wake
-  lateness 1.37 ms), so short packet times spin through the interval and PTP
-  polling is throttled after lock. This costs one busy CPU core while such a
-  profile runs; the default 1 ms path is unchanged. UDP output retries
-  transient EAGAIN and raises SO_SNDBUF for the 8000 pkt/s case.
+- `a=fmtp:<pt> channel-order=SMPTE2110.(...)` is derived from each flow's
+  channel labels (greedy ST/51/71 match, remaining runs as `U<nn>`):
+
+  | layout (ch) | one flow | standard multi-flow packing (>8 ch) |
+  | --- | --- | --- |
+  | 2.0 (2) | `(ST)` | – |
+  | 4.1.2 (7) | `(ST,U05)` | – |
+  | 5.1 (6) | `(51)` | – |
+  | 5.1.2 (8) | `(51,U02)` | – |
+  | 7.1 (8) | `(71)` | – |
+  | 7.1.2 (10) | `(71,U02)` | flow0 `(71)` + flow1 `(U02)` |
+  | 5.1.4 (10) | `(51,U04)` | flow0 `(51,U02)` + flow1 `(U02)` |
+  | 7.1.4 (12) | `(71,U04)` | flow0 `(71)` + flow1 `(U04)` |
+  | 9.1.6 (16) | `(71,U08)` | flow0 `(71)` + flow1 `(U08)` |
+
+  Standard AES67 packing caps a flow at 8 channels, so >8-channel layouts are
+  described by several independent SDPs/SAP sessions (the known multi-flow
+  merge limitation); every flow still declares its own correct channel-order.
+- **Level B (125 µs) is experimental, not a supported product mode**
+  (decision 2026-11-26). The wire format is implemented (`ptime_us=125`,
+  6 samples/packet, `a=ptime:0.125`), but on the Z9X/Android platform it needs
+  a busy-spin pacer and still loses ~0.34 % of slots (measured; sleep-based
+  pacing drops ~38 % because nanosleep wake lateness p99 is 1.37 ms against a
+  125 µs slot). The HAL tee + decode path would be worse. Supported and
+  recommended: **1 ms / Level A**. Short-packet-time pacing work stays in the
+  tree behind the experimental switch; UDP output retries transient EAGAIN and
+  raises SO_SNDBUF for that case.
 
 Verification helpers:
 
