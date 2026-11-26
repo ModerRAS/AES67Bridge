@@ -4,7 +4,7 @@ use crate::{
     net::{TOS_EF, dscp, multicast_interface},
     time::{ClockFit, FitResult, MediaClock, TimestampMode, TimestampSource},
 };
-use codec::{Body, ClockId, Message, PTP_TIMESCALE, PortId, TWO_STEP, UNICAST};
+use codec::{Body, ClockId, Message, PTP_TIMESCALE, PortId, UNICAST};
 use std::{
     collections::VecDeque,
     hash::{BuildHasher, RandomState},
@@ -12,12 +12,65 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
 };
 
+/// Delay_Req rate of the follower. 125 ms (2^-3 s, i.e. logMinDelayReqInterval
+/// -3) is within the AES67 media profile's permitted range (-3..=5) and is the
+/// value ST 2059-2 initialises logMinDelayReqInterval to when Sync runs at
+/// 125 ms, so one rate satisfies both profiles while locking quickly.
 const REQUEST_INTERVAL: i128 = 125_000_000;
 const EXCHANGE_MAX_AGE: i128 = 2_000_000_000;
 const MAX_ROUND_TRIP: i128 = 40_000_000;
 const SYNC_HISTORY: usize = 16;
-const ANNOUNCE_MISSES: i128 = 5;
 const DELAY_RESPONSE_TIMEOUT: i128 = 1_000_000_000;
+
+/// PTP profile the follower is configured for.
+///
+/// AES67 media profile (AES-R16, domain 0 by default) and SMPTE ST 2059-2
+/// (domain 127 by default) share the IEEE 1588-2008 wire format; they differ in
+/// default domain, announce/sync cadence ranges and announceReceiptTimeout
+/// (3 in both). The follower accepts either cadence and records when a master
+/// announces a rate outside its profile's range, so a mixed domain can still
+/// lock while the diagnostic shows the mismatch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Profile {
+    #[default]
+    Aes67,
+    St2059_2,
+}
+
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Aes67 => "aes67",
+            Profile::St2059_2 => "st2059-2",
+        }
+    }
+    /// IEEE 1588 default domain of the profile (0 for AES67, 127 for ST 2059-2).
+    pub fn default_domain(self) -> u8 {
+        match self {
+            Profile::Aes67 => 0,
+            Profile::St2059_2 => 127,
+        }
+    }
+    /// portDS.logAnnounceInterval range (AES67 media profile 0..=4 = 1 s..16 s;
+    /// ST 2059-2 -3..=1 = 125 ms..2 s).
+    pub fn announce_log_range(self) -> std::ops::RangeInclusive<i8> {
+        match self {
+            Profile::Aes67 => 0..=4,
+            Profile::St2059_2 => -3..=1,
+        }
+    }
+    /// portDS.logSyncInterval range (AES67 -4..=1; ST 2059-2 -7..=-1).
+    pub fn sync_log_range(self) -> std::ops::RangeInclusive<i8> {
+        match self {
+            Profile::Aes67 => -4..=1,
+            Profile::St2059_2 => -7..=-1,
+        }
+    }
+    /// portDS.announceReceiptTimeout: 3 in both profiles (range 2..=10).
+    pub fn announce_receipt_timeout(self) -> i128 {
+        3
+    }
+}
 
 fn announce_interval(log: i8) -> Option<i128> {
     // 0x7f denotes an unspecified interval, which cannot establish cadence.
@@ -51,10 +104,15 @@ pub struct Diagnostics {
     last_fit_reject: Option<FitResult>,
     last_lost_reason: Option<&'static str>,
     announce_interval_ns: i128,
+    /// Announces whose logAnnounceInterval fell outside this profile's range.
+    announce_interval_out_of_profile: u64,
+    /// Sync/FollowUp messages whose logSyncInterval fell outside this profile's range.
+    sync_interval_out_of_profile: u64,
 }
 
 #[derive(Clone)]
 pub struct Config {
+    pub profile: Profile,
     pub domain: u8,
     pub pinned_gm: Option<ClockId>,
     pub interface: Ipv4Addr,
@@ -93,6 +151,7 @@ struct Delay {
 }
 
 struct State {
+    profile: Profile,
     domain: u8,
     pin: Option<ClockId>,
     mode: TimestampMode,
@@ -112,6 +171,7 @@ struct State {
 impl State {
     fn new(config: &Config, port: PortId, mode: TimestampMode) -> Self {
         Self {
+            profile: config.profile,
             domain: config.domain,
             pin: config.pinned_gm,
             mode,
@@ -140,7 +200,7 @@ impl State {
     }
 
     fn expire(&mut self, now: i128) {
-        let budget = self.diagnostics.announce_interval_ns * ANNOUNCE_MISSES;
+        let budget = self.diagnostics.announce_interval_ns * self.profile.announce_receipt_timeout();
         if self.master.is_some() && now - self.announce_at >= budget {
             if self.clock.fit().is_some() {
                 self.diagnostics.last_lost_reason = Some("announce_timeout");
@@ -170,7 +230,7 @@ impl State {
         let result = self.accept(msg, ip, now, event);
         let counts = match msg.body {
             Body::Announce { .. } => &mut self.diagnostics.announce,
-            Body::Sync => &mut self.diagnostics.sync,
+            Body::Sync | Body::SyncOneStep(_) => &mut self.diagnostics.sync,
             Body::FollowUp(_) => &mut self.diagnostics.follow_up,
             Body::DelayReq(_) => &mut self.diagnostics.delay_req,
             Body::DelayResp { .. } => &mut self.diagnostics.delay_resp,
@@ -206,6 +266,9 @@ impl State {
                 return Err("invalid_announce");
             }
             let cadence = announce_interval(msg.log_interval).ok_or("invalid_announce_interval")?;
+            if !self.profile.announce_log_range().contains(&msg.log_interval) {
+                self.diagnostics.announce_interval_out_of_profile += 1;
+            }
             let master = Master {
                 gm: grandmaster,
                 port: msg.source,
@@ -234,10 +297,18 @@ impl State {
             return Err("wrong_master");
         }
         match msg.body {
-            Body::Sync if event && msg.flags & TWO_STEP != 0 => {
+            Body::Sync if event => {
+                self.check_sync_log(msg.log_interval);
                 self.sync(msg, now, Some(now), None)
             }
-            Body::FollowUp(stamp) if !event => self.sync(msg, now, None, Some(stamp)),
+            Body::SyncOneStep(stamp) if event => {
+                self.check_sync_log(msg.log_interval);
+                self.sync(msg, now, Some(now), Some(stamp))
+            }
+            Body::FollowUp(stamp) if !event => {
+                self.check_sync_log(msg.log_interval);
+                self.sync(msg, now, None, Some(stamp))
+            }
             Body::DelayResp {
                 received_ns,
                 requester,
@@ -260,6 +331,13 @@ impl State {
                 Ok(())
             }
             _ => Err("unsupported_message_or_socket"),
+        }
+    }
+
+    /// Records (but does not reject) a Sync cadence outside this profile's range.
+    fn check_sync_log(&mut self, log_interval: i8) {
+        if !self.profile.sync_log_range().contains(&log_interval) {
+            self.diagnostics.sync_interval_out_of_profile += 1;
         }
     }
 
@@ -596,6 +674,7 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codec::TWO_STEP;
     #[test]
     fn two_step_pin_domain_corrections_loss_and_recovery() {
         let ip = Ipv4Addr::LOCALHOST;
@@ -603,6 +682,7 @@ mod tests {
         let master: PortId = [2; 10];
         let port = [1; 10];
         let config = Config {
+            profile: Profile::St2059_2,
             domain: 42,
             pinned_gm: Some(gm),
             interface: ip,
@@ -713,7 +793,7 @@ mod tests {
             let fit = s.locked().unwrap().1;
             assert!((fit.rate_ppm - 80.0).abs() < 0.01);
             assert!((fit.ptp_ns(cycle) - (epoch + cycle + cycle * 80 / 1_000_000)).abs() <= 3);
-            let announce_deadline = cycle + 11 * 130_000_000 + 5 * 125_000_000;
+            let announce_deadline = cycle + 11 * 130_000_000 + 3 * 125_000_000;
             s.expire(announce_deadline - 1);
             assert!(s.locked().is_some());
             s.expire(announce_deadline);
@@ -721,5 +801,140 @@ mod tests {
             assert!(s.locked().is_none());
             assert!(s.master.is_none());
         }
+    }
+
+    /// ST 2059-2 sec 6.6: followers shall support one-step and two-step clocks.
+    /// One-step Sync carries the precise origin timestamp itself, so the pair
+    /// completes on the event socket without a FollowUp.
+    #[test]
+    fn one_step_sync_locks_and_profile_cadences_are_diagnosed() {
+        let ip = Ipv4Addr::LOCALHOST;
+        let gm = [3; 8];
+        let master: PortId = [2; 10];
+        let port = [1; 10];
+        let config = Config {
+            profile: Profile::St2059_2,
+            domain: 127,
+            pinned_gm: Some(gm),
+            interface: ip,
+            multicast: Ipv4Addr::new(224, 0, 1, 129),
+            unicast_master: Some(ip),
+            event_port: 319,
+            general_port: 320,
+            local_event_port: 0,
+            local_general_port: 0,
+        };
+        let mut s = State::new(&config, port, TimestampMode::Software);
+        assert_eq!(config.profile.default_domain(), 127);
+        assert_eq!(config.profile.announce_log_range(), -3..=1);
+        assert_eq!(config.profile.sync_log_range(), -7..=-1);
+
+        let msg = |body, seq, flags, correction_scaled_ns, log_interval| Message {
+            log_interval,
+            domain: 127,
+            source: master,
+            seq,
+            flags,
+            correction_scaled_ns,
+            body,
+        };
+        let epoch = 1_900_000_000_000_000_000_i128;
+        for seq in 0..12_u16 {
+            let x = i128::from(seq) * 130_000_000;
+            let t1 = epoch + x + x * 80 / 1_000_000;
+            // Announce cadence 2^0 = 1 s (ST 2059-2 range), Sync 2^-3 = 125 ms.
+            s.receive(
+                msg(
+                    Body::Announce { grandmaster: gm },
+                    seq,
+                    PTP_TIMESCALE,
+                    0,
+                    0,
+                ),
+                ip,
+                x,
+                false,
+            );
+            let arrival = x + 40_000;
+            s.receive(
+                msg(Body::SyncOneStep(t1), seq, 0, 0, -3),
+                ip,
+                arrival,
+                true,
+            );
+            let req = s.request(x + 60_000, true).unwrap();
+            s.pending.as_mut().unwrap().sent_ns = Some(x + 60_000);
+            let received_ns = t1 + 149_908;
+            s.receive(
+                msg(
+                    Body::DelayResp {
+                        received_ns,
+                        requester: port,
+                    },
+                    req.seq,
+                    0,
+                    0,
+                    0,
+                ),
+                ip,
+                x + 200_000,
+                false,
+            );
+            s.finish_exchange(x + 200_000);
+        }
+        let fit = s.locked().expect("one-step master must lock").1;
+        assert!((fit.rate_ppm - 80.0).abs() < 0.01);
+        assert_eq!(s.diagnostics.announce_interval_out_of_profile, 0);
+        assert_eq!(s.diagnostics.sync_interval_out_of_profile, 0);
+        // Same packets under the AES67 media profile: an announce interval of
+        // 2^5 = 32 s is outside its 1 s..16 s range and is recorded, but the
+        // session still locks (interoperability over strict rejection).
+        let config = Config {
+            profile: Profile::Aes67,
+            ..config
+        };
+        let mut s = State::new(&config, port, TimestampMode::Software);
+        for seq in 0..12_u16 {
+            let x = i128::from(seq) * 130_000_000;
+            let t1 = epoch + x + x * 80 / 1_000_000;
+            s.receive(
+                msg(
+                    Body::Announce { grandmaster: gm },
+                    seq,
+                    PTP_TIMESCALE,
+                    0,
+                    5,
+                ),
+                ip,
+                x,
+                false,
+            );
+            s.receive(
+                msg(Body::SyncOneStep(t1), seq, 0, 0, -3),
+                ip,
+                x + 40_000,
+                true,
+            );
+            let req = s.request(x + 60_000, true).unwrap();
+            s.pending.as_mut().unwrap().sent_ns = Some(x + 60_000);
+            s.receive(
+                msg(
+                    Body::DelayResp {
+                        received_ns: t1 + 149_908,
+                        requester: port,
+                    },
+                    req.seq,
+                    0,
+                    0,
+                    0,
+                ),
+                ip,
+                x + 200_000,
+                false,
+            );
+            s.finish_exchange(x + 200_000);
+        }
+        assert!(s.locked().is_some());
+        assert_eq!(s.diagnostics.announce_interval_out_of_profile, 12);
     }
 }

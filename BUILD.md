@@ -34,8 +34,9 @@ cargo build --release --target armv7-linux-androideabi --bins
 ```
 
 The x86_64 host binaries (`aes67-feed`, `aes67-recv`, `aes67-compliance`,
-`aes67-dump-src`) come from the same crate. `aes67-daemon --help` lists the CLI;
-`daemon.conf` keys are documented in `daemon-rs/src/config.rs`.
+`aes67-dump-src`, `aes67-ptp-master`) come from the same crate.
+`aes67-daemon --help` lists the CLI; `daemon.conf` keys are documented in
+`daemon-rs/src/config.rs`.
 
 ## 2. HAL tee proxy (armv7 C)
 
@@ -65,6 +66,47 @@ Note on measurement: AES67 L24 payloads are network order (**big-endian** 3-byte
 samples); WAV files are little-endian. Parsing one as the other turns a clean tone
 into broadband "white noise" (zcr ≈ 0.5, tone bins collapse) — a common false
 positive when comparing captures.
+
+## 2.2 SMPTE ST 2110-30 / ST 2059-2 alignment (0.2.6)
+
+The RTP/SDP layer is the AES67 subset that ST 2110-30 constrains; 0.2.6 adds
+the missing ST 2110-30 profile pieces:
+
+- `daemon.conf ptp_profile=aes67|st2059-2` (GUI: 设置 → 时钟源 → PTP Profile).
+  - `aes67`: AES67 media profile semantics, default domain 0.
+  - `st2059-2`: default domain **127**, announceReceiptTimeout 3; the follower
+    accepts and diagnoses the ST 2059-2 announce (1 s) / Sync (125 ms) cadence
+    ranges and now supports **one-step and two-step** leaders (ST 2059-2 sec 6.6).
+  - An explicit `ptp_domain=` always wins over the profile default. SDP
+    `a=clock-domain:PTPv2 <domain>` and
+    `a=ts-refclk:ptp=IEEE1588-2008:<GMID>:<domain>` follow it.
+- `a=fmtp:<pt> channel-order=SMPTE2110.(...)` is derived from the flow's channel
+  labels: 2.0 → `(ST)`, 5.1 → `(51)`, 7.1 → `(71)`, 5.1.2 → `(51,U02)`,
+  7.1.4 → `(71,U04)`; unmatched runs become Undefined groups (`U<nn>`).
+- `ptime_us=125` is the ST 2110-30 Level B packet time (48 kHz, 1–8 ch).
+  On Android, sleep-based pacing at 125 µs drops slots (measured p99 wake
+  lateness 1.37 ms), so short packet times spin through the interval and PTP
+  polling is throttled after lock. This costs one busy CPU core while such a
+  profile runs; the default 1 ms path is unchanged. UDP output retries
+  transient EAGAIN and raises SO_SNDBUF for the 8000 pkt/s case.
+
+Verification helpers:
+
+- `aes67-ptp-master --interface IP --follower IP [--domain 127]`
+  (`--event-port 1319 --general-port 1320 --follower-event-port 2319
+  --follower-general-port 2320`, `--one-step`, `--seconds N`): a test leader
+  (Announce/Sync/FollowUp + Delay_Resp) for verifying the follower against
+  ST 2059-2 values without a broadcast grandmaster. Not part of the product.
+- The daemon has matching hidden test knobs
+  `--ptp-event-port/--ptp-general-port/--ptp-local-event-port/--ptp-local-general-port`
+  so an isolated instance can coexist with the production daemon (which owns
+  319/320).
+- `aes67-recv --json/--raw/--arrival-log` verifies the 125 µs wire format
+  (payload = ch × samples × width, timestamp step = samples per packet,
+  `ptime:0.125` in SDP).
+
+See `HANDOFF/20261125-aes67-auto-router-ui/` §18 and
+`evidence/st2110-30-ptp-profile-levelb.txt` for the measured results.
 
 ## 3. Android TV app
 

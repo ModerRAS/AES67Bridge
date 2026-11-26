@@ -122,6 +122,10 @@ impl Output {
             socket.set_multicast_ttl_v4(u32::from(flow.ttl))?;
         }
         socket.set_nonblocking(true)?;
+        // ST 2110-30 Level B (125 us) sends 8000 datagrams/s; on Android the
+        // default UDP send buffer can fill transiently and send() returns
+        // EAGAIN. Ask for a larger queue (best effort; the kernel clamps it).
+        let _ = crate::net::raise_send_buffer(&socket, 1 << 20);
         // AES67-2023 sec 6.2 Table 1 (line 1300-1302): mark media AF41 (34).
         // Best effort: some Windows stacks reject IP_TOS on a bound socket.
         let _ = dscp(&socket, TOS_AF41);
@@ -232,7 +236,12 @@ impl Output {
                 Err(io::ErrorKind::WriteZero.into())
             }
         });
-        self.sequence = self.sequence.wrapping_add(1);
+        // Keep the sequence aligned with what actually left the process: a
+        // failed slot must not consume a sequence number/appear as a gap that
+        // the receiver can never account for.
+        if sent.is_ok() {
+            self.sequence = self.sequence.wrapping_add(1);
+        }
         sent
     }
 
@@ -243,7 +252,20 @@ impl Output {
                 return Err(io::ErrorKind::Other.into());
             }
         }
-        self.socket.send(packet)
+        // Android's tx queue can report EAGAIN transiently at 8000 datagrams/s;
+        // a short bounded retry keeps the slot (the alternative is a permanent
+        // receiver-visible gap because UDP has no retransmission).
+        let mut attempt = 0;
+        loop {
+            match self.socket.send(packet) {
+                Ok(size) => return Ok(size),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock && attempt < 400 => {
+                    attempt += 1;
+                    std::thread::yield_now();
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 /// Absolute PTP packet grid. Slots are delimited by the exact rational media

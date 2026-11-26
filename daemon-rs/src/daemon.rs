@@ -167,7 +167,7 @@ impl Daemon {
             RtpEncoding::L16
         };
         logln!(
-            "v{} start fifo={} meta={} sdp={} status={} conf={} lock={} group={} port={} ptime_us={} maxch={} layout={} codec={} encoding={} pt={} mtu={} split={} ch={} rate={} seconds={:.0} local_ip={} resampler={:?} ptp={} ptp_gm={:?} ptp_domain={} sap={}",
+            "v{} start fifo={} meta={} sdp={} status={} conf={} lock={} group={} port={} ptime_us={} maxch={} layout={} codec={} encoding={} pt={} mtu={} split={} ch={} rate={} seconds={:.0} local_ip={} resampler={:?} ptp={} ptp_profile={} ptp_gm={:?} ptp_domain={} sap={}",
             env!("CARGO_PKG_VERSION"),
             cfg.fifo,
             cfg.meta,
@@ -191,8 +191,9 @@ impl Daemon {
             local_ip,
             cfg.resampler,
             cfg.ptp,
+            cfg.ptp_profile.name(),
             cfg.ptp_master,
-            cfg.ptp_domain,
+            cfg.effective_ptp_domain(),
             cfg.sap
         );
         if cfg.pt != 0 {
@@ -2385,15 +2386,19 @@ pub fn build_session_config_for(
         }
     }
     let ptp = ptp::Config {
-        domain: cfg.ptp_domain,
+        profile: match cfg.ptp_profile {
+            crate::config::PtpProfile::Aes67 => ptp::Profile::Aes67,
+            crate::config::PtpProfile::St2059_2 => ptp::Profile::St2059_2,
+        },
+        domain: cfg.effective_ptp_domain(),
         pinned_gm: None,
         interface: cfg.ptp_interface.unwrap_or(local_ip),
         multicast: Ipv4Addr::new(224, 0, 1, 129),
         unicast_master: cfg.ptp_master,
-        event_port: 319,
-        general_port: 320,
-        local_event_port: 0,
-        local_general_port: 0,
+        event_port: cfg.ptp_event_port,
+        general_port: cfg.ptp_general_port,
+        local_event_port: cfg.ptp_local_event_port,
+        local_general_port: cfg.ptp_local_general_port,
     };
     let flows: Vec<Flow> = plan
         .iter()
@@ -2731,6 +2736,8 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         rate_ppm: 0.0,
         fit_rms_ns: 0.0,
         ptp_mode,
+        ptp_profile: cfg.ptp_profile.name(),
+        ptp_domain: cfg.effective_ptp_domain(),
         sap: cfg.sap,
         sap_interval_s: cfg.sap_interval_s,
         bits: if include_bits { Some(&bits_view) } else { None },
@@ -2831,6 +2838,8 @@ fn write_status(
         rate_ppm: counters.rate_ppm,
         fit_rms_ns: counters.fit_rms_ns,
         ptp_mode,
+        ptp_profile: cfg.ptp_profile.name(),
+        ptp_domain: cfg.effective_ptp_domain(),
         sap: cfg.sap,
         sap_interval_s: cfg.sap_interval_s,
         bits,

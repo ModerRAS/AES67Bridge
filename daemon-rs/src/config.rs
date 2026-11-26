@@ -290,6 +290,39 @@ pub enum ResamplerKind {
     CPoly,
 }
 
+/// PTP profile selection. Both use the IEEE 1588-2008 v2 wire format; the
+/// profile decides the default domain and the announce/sync cadence ranges the
+/// follower expects (and diagnoses). ST 2110 deployments use ST 2059-2.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PtpProfile {
+    #[default]
+    Aes67,
+    St2059_2,
+}
+
+impl PtpProfile {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "aes67" | "media" | "aes" => Some(Self::Aes67),
+            "st2059-2" | "st2059_2" | "st2059" | "2059-2" | "smpte" => Some(Self::St2059_2),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Aes67 => "aes67",
+            Self::St2059_2 => "st2059-2",
+        }
+    }
+    /// IEEE 1588 domain default: AES67 media profile 0, ST 2059-2 127.
+    pub fn default_domain(self) -> u8 {
+        match self {
+            Self::Aes67 => 0,
+            Self::St2059_2 => 127,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub fifo: String,
@@ -357,9 +390,18 @@ pub struct Config {
     pub labels: Vec<String>,
     pub channel_map: Vec<usize>,
     pub ptp: bool,
-    pub ptp_domain: u8,
+    pub ptp_profile: PtpProfile,
+    /// Explicit PTP domain; None uses the profile default (AES67 0, ST 2059-2 127).
+    pub ptp_domain: Option<u8>,
     pub ptp_master: Option<Ipv4Addr>,
     pub ptp_interface: Option<Ipv4Addr>,
+    /// PTP UDP ports. The event/general ports are the remote (leader) ports;
+    /// the local ports let a test instance coexist with the production daemon
+    /// on one host (0 = same as the remote port, the IEEE 1588 default).
+    pub ptp_event_port: u16,
+    pub ptp_general_port: u16,
+    pub ptp_local_event_port: u16,
+    pub ptp_local_general_port: u16,
     pub force_ch: usize,
     pub force_rate: u32,
     pub seconds: f64,
@@ -414,9 +456,14 @@ impl Default for Config {
             labels: Vec::new(),
             channel_map: Vec::new(),
             ptp: false,
-            ptp_domain: 0,
+            ptp_profile: PtpProfile::Aes67,
+            ptp_domain: None,
             ptp_master: None,
             ptp_interface: None,
+            ptp_event_port: 319,
+            ptp_general_port: 320,
+            ptp_local_event_port: 0,
+            ptp_local_general_port: 0,
             force_ch: 0,
             force_rate: 0,
             seconds: 0.0,
@@ -480,6 +527,12 @@ impl Config {
         }
     }
 
+    /// Domain the follower actually uses: explicit `ptp_domain` wins, otherwise
+    /// the selected profile's default (AES67 0, ST 2059-2 127).
+    pub fn effective_ptp_domain(&self) -> u8 {
+        self.ptp_domain.unwrap_or(self.ptp_profile.default_domain())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.maxch < 2 || self.maxch > MAX_CH {
             return Err(format!("--maxch {} out of range 2..{}", self.maxch, MAX_CH));
@@ -505,8 +558,10 @@ impl Config {
                 self.layout
             ));
         }
-        if self.ptp_domain > 127 {
-            return Err(format!("--ptp-domain {} out of range 0..127", self.ptp_domain));
+        if let Some(domain) = self.ptp_domain {
+            if domain > 127 {
+                return Err(format!("--ptp-domain {} out of range 0..127", domain));
+            }
         }
         if self.port == 0 {
             return Err(format!("--port {}", self.port));
@@ -560,7 +615,8 @@ impl Config {
 [--ch N] [--rate R] \
 [--local-ip IP|auto] [--resampler rubato|c-poly] [--sap] [--sap-interval S] [--http-port P] \
 [--source-filter] [--labels L,R,...] [--channel-map 0,1,...] \
-[--ptp] [--ptp-domain D] [--ptp-master IP|--ptp-gm IP] [--ptp-interface IP] \
+[--ptp] [--ptp-profile aes67|st2059-2] [--ptp-domain D] [--ptp-master IP|--ptp-gm IP] [--ptp-interface IP] \
+[--ptp-event-port P] [--ptp-general-port P] [--ptp-local-event-port P] [--ptp-local-general-port P] \
 [--ssrc HEX] [--log PATH] [--trace-data N]"
         )
     }
@@ -707,10 +763,17 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
             }
         }
         "ptp" => cfg.ptp = parse_bool(value),
+        "ptp_profile" => {
+            cfg.ptp_profile = PtpProfile::parse(value)
+                .ok_or_else(|| format!("{origin}: bad ptp_profile '{value}' (aes67|st2059-2)"))?
+        }
         "ptp_domain" => {
-            cfg.ptp_domain = value
-                .parse()
-                .map_err(|_| format!("{origin}: bad ptp_domain '{value}'"))?
+            cfg.ptp_domain = Some(
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("{origin}: bad ptp_domain '{value}'"))?,
+            )
         }
         "ptp_master" | "ptp_gm" => {
             // ptp_gm is the TV UI key; an empty value means "no pinned GM".
@@ -728,6 +791,30 @@ fn apply_key_value(cfg: &mut Config, key: &str, value: &str, origin: &str) -> Re
                 platform::parse_ipv4(value)
                     .ok_or_else(|| format!("{origin}: bad ptp_interface '{value}'"))?,
             )
+        }
+        "ptp_event_port" => {
+            cfg.ptp_event_port = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{origin}: bad ptp_event_port '{value}'"))?
+        }
+        "ptp_general_port" => {
+            cfg.ptp_general_port = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{origin}: bad ptp_general_port '{value}'"))?
+        }
+        "ptp_local_event_port" => {
+            cfg.ptp_local_event_port = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{origin}: bad ptp_local_event_port '{value}'"))?
+        }
+        "ptp_local_general_port" => {
+            cfg.ptp_local_general_port = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{origin}: bad ptp_local_general_port '{value}'"))?
         }
         "pt" => {
             cfg.pt = value
@@ -929,14 +1016,30 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
                     .map_err(|_| "--channel-map 0,1,...".to_string())?;
             }
             "--ptp" => cfg.ptp = true,
+            "--ptp-profile" => {
+                cfg.ptp_profile = PtpProfile::parse(&next(&mut index, args)?)
+                    .ok_or("--ptp-profile aes67|st2059-2")?;
+            }
             "--ptp-domain" => {
-                cfg.ptp_domain = next(&mut index, args)?.parse().unwrap_or(0);
+                cfg.ptp_domain = Some(next(&mut index, args)?.parse().unwrap_or(0));
             }
             "--ptp-master" | "--ptp-gm" => {
                 cfg.ptp_master = Some(
                     platform::parse_ipv4(&next(&mut index, args)?)
                         .ok_or("--ptp-master needs an IPv4 address")?,
                 );
+            }
+            "--ptp-event-port" => {
+                cfg.ptp_event_port = next(&mut index, args)?.parse().unwrap_or(319);
+            }
+            "--ptp-general-port" => {
+                cfg.ptp_general_port = next(&mut index, args)?.parse().unwrap_or(320);
+            }
+            "--ptp-local-event-port" => {
+                cfg.ptp_local_event_port = next(&mut index, args)?.parse().unwrap_or(0);
+            }
+            "--ptp-local-general-port" => {
+                cfg.ptp_local_general_port = next(&mut index, args)?.parse().unwrap_or(0);
             }
             "--ptp-interface" => {
                 cfg.ptp_interface = Some(
@@ -1054,9 +1157,17 @@ mod tests {
         assert_eq!(cfg.encoding, Encoding::L16, "codec=l16");
         assert!(cfg.legacy_split && !cfg.no_split, "split=0 is legacy RTP fragmentation");
         assert_eq!(cfg.ptp_master, Some(Ipv4Addr::new(192, 168, 1, 10)));
-        assert_eq!(cfg.ptp_domain, 24);
+        assert_eq!(cfg.ptp_domain, Some(24));
+        assert_eq!(cfg.effective_ptp_domain(), 24);
         assert!(cfg.ptp);
         cfg.validate().unwrap();
+        // Without an explicit domain the profile decides (AES67 0, ST 2059-2 127).
+        let mut cfg = Config::default();
+        assert_eq!(cfg.effective_ptp_domain(), 0);
+        cfg.ptp_profile = PtpProfile::St2059_2;
+        assert_eq!(cfg.effective_ptp_domain(), 127);
+        cfg.ptp_domain = Some(0);
+        assert_eq!(cfg.effective_ptp_domain(), 0);
     }
 
     #[test]

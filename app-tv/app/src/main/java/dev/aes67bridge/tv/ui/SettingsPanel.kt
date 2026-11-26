@@ -72,7 +72,7 @@ internal val ConfDefault = mapOf(
     "ptime_us" to "1000", "codec" to "pcm", "layout" to "7.1",
     "split" to "1", "sap" to "1", "gain_db" to "0", "limiter_db" to "-1",
     "hal_buf" to "20", "fifo_kb" to "32", "auto_idle_ms" to "0", "ptp" to "0",
-    "ptp_gm" to "", "ptp_domain" to "0", "asrc" to "0", "pt" to "",
+    "ptp_gm" to "", "ptp_domain" to "0", "ptp_profile" to "aes67", "asrc" to "0", "pt" to "",
     "http_port" to "8080", "resampler" to "rubato",
     "pcm_export" to "1", "bits_export" to "1", "boot" to "1",
     "engine" to "rust", "decode" to "auto"
@@ -488,7 +488,7 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                         "自动(组播)",
                                         selected = get("ptp") == "1" && get("ptp_gm").isEmpty()
                                     ) {
-                                        set("ptp", "1"); set("ptp_gm", ""); set("ptp_domain", "0")
+                                        set("ptp", "1"); set("ptp_gm", ""); set("ptp_domain", "0"); set("ptp_profile", "aes67")
                                     }
                                     OptChip(
                                         if (get("ptp") == "1" && get("ptp_gm").isNotEmpty())
@@ -497,6 +497,21 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                         selected = get("ptp") == "1" && get("ptp_gm").isNotEmpty()
                                     ) { gmAddr = get("ptp_gm"); gmDomain = get("ptp_domain"); page = 2 }
                                 }
+                                RowLabel("PTP Profile") {
+                                    OptChip(
+                                        "AES67 · d0",
+                                        selected = get("ptp_profile") != "st2059-2"
+                                    ) {
+                                        set("ptp", "1"); set("ptp_profile", "aes67"); set("ptp_domain", "0")
+                                    }
+                                    OptChip(
+                                        "ST 2059-2 · d127",
+                                        selected = get("ptp_profile") == "st2059-2"
+                                    ) {
+                                        set("ptp", "1"); set("ptp_profile", "st2059-2"); set("ptp_domain", "127")
+                                    }
+                                }
+                                Hint("对接 SMPTE ST 2110 网络用 ST 2059-2（domain 127，Sync 125ms/Announce 1s 参数）；纯 AES67 域用 AES67 media profile（domain 0）。手动 GM 时可单独改 domain。")
                                 Hint("自动：监听 PTP 组播通告并锁定（实测有效，推荐）；手动：填 GM 的 IP + domain（若 GM 不支持 unicast 协商会自动回退组播）；关：用本机时钟")
                                 RowLabel("ASRC") {
                                     OptChip("关", selected = get("asrc") == "0") { set("asrc", "0") }

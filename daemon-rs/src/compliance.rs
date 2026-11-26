@@ -821,6 +821,8 @@ fn check_status_contract() -> Result<String, String> {
         rate_ppm: 0.0,
         fit_rms_ns: 0.0,
         ptp_mode: "local",
+        ptp_profile: "aes67",
+        ptp_domain: 0,
         sap: false,
         sap_interval_s: 30,
         bits: None,

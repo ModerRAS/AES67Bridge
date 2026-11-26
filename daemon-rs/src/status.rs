@@ -81,6 +81,10 @@ pub struct Snapshot<'a> {
     pub rate_ppm: f64,
     pub fit_rms_ns: f64,
     pub ptp_mode: &'a str,
+    /// PTP profile name: "aes67" or "st2059-2".
+    pub ptp_profile: &'a str,
+    /// Effective PTP domain (profile default when not explicitly configured).
+    pub ptp_domain: u8,
     pub sap: bool,
     pub sap_interval_s: u32,
     pub bits: Option<&'a BitsStatus<'a>>,
@@ -170,8 +174,10 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     );
     let _ = write!(
         out,
-        "\"ptp\":{{\"mode\":\"{}\",\"locked\":{},\"timestamping\":{},\"offset_ns\":{:.1},\"rate_ppm\":{:.3},\"fit_rms_ns\":{:.1}}},",
+        "\"ptp\":{{\"mode\":\"{}\",\"profile\":\"{}\",\"domain\":{},\"locked\":{},\"timestamping\":{},\"offset_ns\":{:.1},\"rate_ppm\":{:.3},\"fit_rms_ns\":{:.1}}},",
         snapshot.ptp_mode,
+        snapshot.ptp_profile,
+        snapshot.ptp_domain,
         u8::from(snapshot.locked),
         snapshot.timestamping,
         snapshot.offset_ns,
@@ -370,6 +376,8 @@ mod tests {
             rate_ppm: 0.0,
             fit_rms_ns: 0.0,
             ptp_mode: "local",
+            ptp_profile: "aes67",
+            ptp_domain: 0,
             sap: false,
             sap_interval_s: 30,
             bits: None,

@@ -5,7 +5,10 @@ pub type PortId = [u8; 10];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Body {
+    /// Two-step Sync marker: the precise origin timestamp arrives in FollowUp.
     Sync,
+    /// One-step Sync carrying the precise origin timestamp in its own body.
+    SyncOneStep(i128),
     DelayReq(i128),
     FollowUp(i128),
     DelayResp {
@@ -98,7 +101,14 @@ pub fn decode(buf: &[u8]) -> Result<Message, DecodeError> {
         tlvs = &tlvs[4 + value_len..];
     }
     let body = match kind {
-        0 => Body::Sync,
+        0 => {
+            let flags = u16::from_be_bytes([b[6], b[7]]);
+            if flags & TWO_STEP != 0 {
+                Body::Sync
+            } else {
+                Body::SyncOneStep(stamp(&b[34..44])?)
+            }
+        }
         1 => Body::DelayReq(stamp(&b[34..44])?),
         8 => Body::FollowUp(stamp(&b[34..44])?),
         9 => Body::DelayResp {
@@ -129,7 +139,7 @@ fn put_stamp(buf: &mut [u8], ns: i128) {
 pub fn encode(msg: Message, b: &mut [u8; 64]) -> &[u8] {
     b.fill(0);
     let (ty, control, length) = match msg.body {
-        Body::Sync => (0, 0, 44_u16),
+        Body::Sync | Body::SyncOneStep(_) => (0, 0, 44_u16),
         Body::DelayReq(_) => (1, 1, 44),
         Body::FollowUp(_) => (8, 2, 44),
         Body::DelayResp { .. } => (9, 3, 54),
@@ -147,6 +157,7 @@ pub fn encode(msg: Message, b: &mut [u8; 64]) -> &[u8] {
     b[33] = msg.log_interval as u8;
     match msg.body {
         Body::Sync => (),
+        Body::SyncOneStep(ns) => put_stamp(&mut b[34..44], ns),
         Body::DelayReq(ns) | Body::FollowUp(ns) => put_stamp(&mut b[34..44], ns),
         Body::DelayResp {
             received_ns,
@@ -166,24 +177,31 @@ mod tests {
     #[test]
     fn codec_preserves_wire_fields_and_bounds() {
         let received_ns = 1_900_000_000_123_456_789;
-        for body in [
-            Body::Sync,
-            Body::FollowUp(received_ns),
-            Body::DelayReq(0),
-            Body::DelayResp {
-                received_ns,
-                requester: [9; 10],
-            },
-            Body::Announce {
-                grandmaster: [8; 8],
-            },
+        for (body, flags) in [
+            (Body::Sync, TWO_STEP | PTP_TIMESCALE),
+            (Body::SyncOneStep(received_ns), PTP_TIMESCALE),
+            (Body::FollowUp(received_ns), PTP_TIMESCALE),
+            (Body::DelayReq(0), PTP_TIMESCALE),
+            (
+                Body::DelayResp {
+                    received_ns,
+                    requester: [9; 10],
+                },
+                PTP_TIMESCALE,
+            ),
+            (
+                Body::Announce {
+                    grandmaster: [8; 8],
+                },
+                PTP_TIMESCALE,
+            ),
         ] {
             let msg = Message {
                 log_interval: -2,
                 domain: 42,
                 source: [3; 10],
                 seq: u16::MAX,
-                flags: TWO_STEP | PTP_TIMESCALE,
+                flags,
                 correction_scaled_ns: -65_535,
                 body,
             };

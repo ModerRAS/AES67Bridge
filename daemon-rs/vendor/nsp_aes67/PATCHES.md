@@ -73,6 +73,44 @@ phantom drops during a 12ch soak whose received audio had zero discontinuities).
 The ring-full branch now returns `QUEUE_FULL` without touching the counter;
 `audio.discard` and oversized chunks still count as drops.
 
+
+## 10. `src/ptp/codec.rs`, `src/ptp/mod.rs` (ST 2110-30 / ST 2059-2 alignment)
+* One-step clocks: added `Body::SyncOneStep(i128)`; Sync decodes to the one-step
+  variant when the twoStepFlag is clear and the follower pairs the embedded
+  origin timestamp on the event socket (ST 2059-2 sec 6.6 requires followers to
+  support one-step and two-step leaders).
+* Added `ptp::Profile` (`Aes67` / `St2059_2`): profile default domain (0 / 127),
+  announce/sync cadence ranges for diagnostics, announceReceiptTimeout 3
+  (replacing the hard-coded 5 misses). `ptp::Config.profile` defaults to Aes67;
+  the bridge daemon sets it from `ptp_profile=`. Delay_Req stays at 125 ms
+  (inside AES67's permitted -3..5 range and ST 2059-2's default init value).
+* `Diagnostics` counts announces/syncs outside the selected profile's range
+  (accepted anyway for interoperability; visible in the PTP diagnostics line).
+
+## 11. `src/sdp/mod.rs` (SMPTE2110 channel-order)
+`channel_order(labels)` derives `a=fmtp:<pt> channel-order=SMPTE2110.(...)` from
+the flow's channel labels (ST/51/71 groups matched greedily, remaining runs as
+`U<nn>`), replacing the stereo-only special case, so 5.1/7.1/5.1.2/7.1.4 streams
+signal the ST 2110-30 sec 6.2.2 grouping convention.
+
+## 12. `src/rtp/mod.rs`, `src/net.rs` (Level B wire robustness)
+* `raise_send_buffer` (SO_SNDBUF, best effort) on RTP outputs.
+* `Output::write` retries a transient `WouldBlock` (EAGAIN) a bounded number of
+  times; Android returns it at 8000 pkt/s.
+* `Output::emit` only advances the sequence number when the packet actually left
+  the process, so a failed slot no longer creates an unaccountable gap.
+
+## 13. `src/session/mod.rs` (short packet times, PTP polling)
+* For packet times <= 250 us the pacer spins through the interval instead of
+  `thread::sleep`: Android/Linux timer coalescing measured p99 wake lateness of
+  1.37 ms at 125 us (vs a 125 us slot), which dropped ~38 % of slots. The
+  1 ms product path keeps the sleep+spin pacer.
+* PTP follower sockets are polled every slot while acquiring and every fourth
+  slot once locked at short packet times (8-1000 PTP messages/s do not need a
+  8000 Hz poll).
+* The first UDP send error per second is printed with its `io::ErrorKind` when
+  `NSP_AES67_PTP_DIAGNOSTICS=1`, which is what identified EAGAIN.
+
 ## Upstream follow-ups
 These patches are candidates for the NSP `feat/aes67-std-ports-rates-ptime`
 branch: local-clock mode, SDP local refclk, multi-flow `Output::send` fix and

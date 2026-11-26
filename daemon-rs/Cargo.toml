@@ -1,6 +1,6 @@
-﻿[package]
+[package]
 name = "aes67-bridge-daemon"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 publish = false
 description = "AES67Bridge device-side sender daemon (Rust port of aes67_rtp_sender C daemon)"
@@ -29,6 +29,12 @@ path = "src/bin/dump_src.rs"
 [[bin]]
 name = "aes67-compliance"
 path = "src/bin/compliance.rs"
+
+# Test-only PTP leader used to verify the follower against the ST 2059-2 values
+# when no broadcast grandmaster is reachable. Not part of the product path.
+[[bin]]
+name = "aes67-ptp-master"
+path = "src/bin/ptp_master.rs"
 
 [dependencies]
 libc = "0.2"

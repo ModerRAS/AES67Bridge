@@ -308,6 +308,7 @@ unsafe fn config(raw: *const ConfigV1) -> Option<Config> {
         return None;
     }
     let ptp = ptp::Config {
+        profile: ptp::Profile::Aes67,
         domain: base.ptp_domain as u8,
         pinned_gm: (base.ptp_gmid != [0; 8]).then_some(base.ptp_gmid),
         interface: ptp_interface,

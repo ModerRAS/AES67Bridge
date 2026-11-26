@@ -54,6 +54,14 @@ pub fn install_stop_handlers() {
 }
 
 pub fn init_timer_resolution() {
+    #[cfg(unix)]
+    unsafe {
+        // Android/Linux default timer slack is 50 us, which is 40 % of a 125 us
+        // (ST 2110-30 Level B) packet interval: a nanosleep-based pacer then
+        // wakes late and the session drops slots. Ask the kernel to wake at the
+        // requested time (same intent as timeBeginPeriod(1) on Windows).
+        libc::prctl(libc::PR_SET_TIMERSLACK, 1, 0, 0, 0);
+    }
     #[cfg(windows)]
     unsafe {
         #[link(name = "winmm")]

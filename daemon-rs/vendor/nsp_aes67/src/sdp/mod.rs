@@ -167,6 +167,56 @@ pub fn describe_local(
     )
 }
 
+/// SMPTE ST 2110-30 sec 6.2.2 channel-order groups for one flow's channel
+/// labels, in the order they appear. Standard soundfield groups are matched
+/// greedily; any remaining run of channels is signalled as one Undefined group
+/// (`U<nn>`), which the standard defines for channels whose ordering is not one
+/// of the Table 1 groups (for example the height pair of a 5.1.2 layout).
+pub fn channel_order(labels: &[String]) -> Option<String> {
+    const GROUPS: &[(&[&str], &str)] = &[
+        (&["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"], "71"),
+        (&["L", "R", "C", "LFE", "Ls", "Rs"], "51"),
+        (&["L", "R"], "ST"),
+        (&["FL", "FR"], "ST"),
+    ];
+    fn starts_with(labels: &[String], names: &[&str]) -> bool {
+        labels.len() >= names.len()
+            && labels
+                .iter()
+                .take(names.len())
+                .zip(names)
+                .all(|(label, name)| label == name)
+    }
+    let mut groups: Vec<String> = Vec::new();
+    let mut undefined = 0usize;
+    let flush = |undefined: &mut usize, groups: &mut Vec<String>| {
+        if *undefined > 0 {
+            groups.push(format!("U{:02}", *undefined));
+            *undefined = 0;
+        }
+    };
+    let mut index = 0;
+    while index < labels.len() {
+        let rest = &labels[index..];
+        match GROUPS
+            .iter()
+            .find(|(names, _)| starts_with(rest, names))
+        {
+            Some((names, symbol)) => {
+                flush(&mut undefined, &mut groups);
+                groups.push((*symbol).to_string());
+                index += names.len();
+            }
+            None => {
+                undefined += 1;
+                index += 1;
+            }
+        }
+    }
+    flush(&mut undefined, &mut groups);
+    (!groups.is_empty()).then(|| groups.join(","))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn describe_with_clock(
     name: &str,
@@ -216,9 +266,8 @@ fn describe_with_clock(
         );
     }
     let labels = &labels[flow.offset..flow.offset + flow.channels];
-    if matches!(labels, [left,right] if (left == "L" && right == "R") || (left == "FL" && right == "FR"))
-    {
-        let _ = write!(s, "a=fmtp:{pt} channel-order=SMPTE2110.(ST)\r\n");
+    if let Some(order) = channel_order(labels) {
+        let _ = write!(s, "a=fmtp:{pt} channel-order=SMPTE2110.({order})\r\n");
     }
     let _ = write!(
         s,
@@ -416,6 +465,41 @@ mod tests {
         let s = describe("test", &output, 0, &["L".into(), "R".into()], reference(), 1, 1, timing, None);
         assert!(s.contains("c=IN IP4 239.69.0.1/32\r\n"));
         assert!(s.contains("a=source-filter: incl IN IP4 239.69.0.1 127.0.0.1\r\n"));
+    }
+
+    #[test]
+    fn channel_order_uses_smpte2110_groups() {
+        let labels = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(channel_order(&labels(&["L", "R"])).as_deref(), Some("ST"));
+        assert_eq!(
+            channel_order(&labels(&["L", "R", "C", "LFE", "Ls", "Rs"])).as_deref(),
+            Some("51")
+        );
+        assert_eq!(
+            channel_order(&labels(&["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"])).as_deref(),
+            Some("71")
+        );
+        // 5.1.2: 5.1 group followed by the height pair as Undefined.
+        assert_eq!(
+            channel_order(&labels(&[
+                "L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr"
+            ]))
+            .as_deref(),
+            Some("51,U02")
+        );
+        assert_eq!(
+            channel_order(&labels(&[
+                "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr"
+            ]))
+            .as_deref(),
+            Some("71,U04")
+        );
+        assert_eq!(channel_order(&labels(&["CH1"])).as_deref(), Some("U01"));
+        assert_eq!(
+            channel_order(&labels(&["Ls", "Rs", "Lb", "Rb"])).as_deref(),
+            Some("U04")
+        );
+        assert_eq!(channel_order(&[]), None);
     }
 
     #[test]

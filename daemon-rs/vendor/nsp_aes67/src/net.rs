@@ -46,6 +46,52 @@ pub fn multicast_interface(socket: &UdpSocket, address: Ipv4Addr) -> io::Result<
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// Best-effort SO_SNDBUF raise. Android's default UDP send queue can report
+/// EAGAIN transiently at ST 2110-30 Level B rates (8000 packets/s); the kernel
+/// clamps the request to net.core.wmem_max.
+pub fn raise_send_buffer(socket: &UdpSocket, bytes: i32) -> io::Result<()> {
+    let bytes = bytes.to_ne_bytes();
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        #[link(name = "ws2_32")]
+        unsafe extern "system" {
+            fn setsockopt(socket: usize, level: i32, name: i32, value: *const u8, len: i32) -> i32;
+            fn WSAGetLastError() -> i32;
+        }
+        let rc = unsafe {
+            setsockopt(
+                socket.as_raw_socket() as usize,
+                0xffff,
+                0x1001,
+                bytes.as_ptr(),
+                4,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(())
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn setsockopt(socket: i32, level: i32, name: i32, value: *const u8, len: u32) -> i32;
+        }
+        let rc = unsafe { setsockopt(socket.as_raw_fd(), 1, 7, bytes.as_ptr(), 4) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+    {
+        let _ = (socket, bytes);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
 /// DSCP traffic-class marking (AES67-2023 Table 1, draft line 1288-1308):
 /// Clock/EF (46) for PTP, Media/AF41 (34) for RTP. TOS is DSCP shifted left 2.
 pub const TOS_AF41: u8 = 34 << 2;

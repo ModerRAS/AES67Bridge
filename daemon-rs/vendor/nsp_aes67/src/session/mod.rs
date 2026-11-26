@@ -439,15 +439,34 @@ impl Network {
             .filter(|slots| (1..=10).contains(slots))
             .unwrap_or(8);
         let pacer = pacer::Pacer::new();
-        let spin_ns = (run.config.timing.slot_period_ns() / 8).clamp(1, 500_000);
+        // At ST 2110-30 Level B packet times (125/250 us) a sleep-wake pacer on
+        // Android/Linux sees millisecond-scale timer coalescing jitter (p99 wake
+        // late ~1.4 ms measured on the Z9X), which drops slots. Spin the whole
+        // interval instead; the cost is one core while such a profile runs.
+        let slot_period = run.config.timing.slot_period_ns();
+        let spin_ns = if slot_period <= 250_000 {
+            slot_period
+        } else {
+            (slot_period / 8).clamp(1, 500_000)
+        };
         let mut next_log = 0;
         let mut deadline = Instant::now() + run.config.lock_timeout;
+        let mut ptp_poll = 0u32;
         let outcome = loop {
             if run.cancel.load(Ordering::Acquire) {
                 break Ok(());
             }
-            if let Err(error) = self.ptp.tick() {
-                break Err(error.into());
+            // PTP messages arrive at 8..1000 per second; polling the follower
+            // sockets on every 125 us slot costs more syscall time than the slot
+            // has. Keep the product ptime polling untouched and throttle only
+            // the short ST 2110-30 Level B packet times.
+            ptp_poll = ptp_poll.wrapping_add(1);
+            // Keep every-slot polling while acquiring/holding nothing; once the
+            // stream is locked the 8..1000 messages/s only need a coarse poll.
+            if slot_period >= 500_000 || stream.gm.is_none() || ptp_poll % 4 == 0 {
+                if let Err(error) = self.ptp.tick() {
+                    break Err(error.into());
+                }
             }
             let now = self.ptp.now_ns();
             let clock = self.ptp.locked();
@@ -766,6 +785,16 @@ impl Network {
                     stream.io_streak[channel] = 0;
                 }
                 Err(err) => {
+                    if errors == 0 && stream.pacing.send_errors < 3 {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            io::stderr(),
+                            "nsp_aes67 send_error kind={:?} raw={:?} ptime_us={}",
+                            err.kind(),
+                            err.raw_os_error(),
+                            run.config.timing.packet_time_us()
+                        );
+                    }
                     errors += 1;
                     if err.kind() != io::ErrorKind::WouldBlock {
                         stream.io_streak[channel] += 1;
@@ -994,6 +1023,7 @@ mod tests {
             prebuffer: 48,
             mode: TimestampMode::Auto,
             ptp: ptp::Config {
+                profile: ptp::Profile::Aes67,
                 domain: 0,
                 pinned_gm: None,
                 interface: Ipv4Addr::LOCALHOST,
