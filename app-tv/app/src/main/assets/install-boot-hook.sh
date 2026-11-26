@@ -11,6 +11,7 @@ chown root:root "$PERSIST" "$PERSIST/boot" "$PERSIST/logs" 2>/dev/null
 chmod 0755 "$PERSIST" "$PERSIST/boot"
 chmod 0700 "$PERSIST/logs"
 exec >> "$LOG" 2>&1
+chmod 0644 "$LOG" 2>/dev/null
 echo "=== $(date) install-boot-hook ==="
 APP_UID=$(stat -c '%u' "$APP" 2>/dev/null)
 APP_GID=$(stat -c '%g' "$APP" 2>/dev/null)

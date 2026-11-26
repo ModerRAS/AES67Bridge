@@ -5,6 +5,7 @@ APP=/data/user/0/dev.aes67bridge.tv/files
 LOG=$APP/tool-result.txt
 umask 027
 exec >> "$LOG" 2>&1
+chmod 0644 "$LOG" 2>/dev/null
 echo "=== $(date) disable-adb ==="
 setprop persist.zidoo.test.dc 0
 setprop persist.zidoo.test.dc1 0

@@ -10,6 +10,7 @@ APP=/data/user/0/dev.aes67bridge.tv/files
 LOG=$APP/tool-result.txt
 umask 027
 exec >> "$LOG" 2>&1
+chmod 0644 "$LOG" 2>/dev/null
 echo "=== $(date) enable-adb ==="
 if [ -f "$APP/adb_pubkey.txt" ]; then
     key=$(head -n 1 "$APP/adb_pubkey.txt" | tr -d '\r')
