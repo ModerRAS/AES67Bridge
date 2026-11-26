@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 
@@ -21,12 +22,19 @@ class AutoStartService : Service() {
         try {
             val dir = filesDir.apply { mkdirs() }.absolutePath
             diag("action=" + action + " dir=" + dir)
+            if (action == "ADB_ENABLE") {
+                val key = intent?.getStringExtra(EXTRA_ADB_PUBKEY).orEmpty().trim()
+                if (key.isNotEmpty()) File(filesDir, "adb_pubkey.txt").writeText(key + "\n")
+            }
             when (action) {
                 "DISABLE" -> { extractAll(dir); diag("trigger stop"); triggerRoot(dir + "/stop.sh") }
                 "ROLLBACK" -> { extractAll(dir); diag("trigger rollback"); triggerRoot(dir + "/rollback.sh") }
                 "LOWLAT" -> { extractAll(dir); diag("trigger lowlat"); triggerRoot(dir + "/mode-lowlat.sh") }
                 "NORMAL" -> { extractAll(dir); diag("trigger normal"); triggerRoot(dir + "/mode-normal.sh") }
                 "APPLY" -> { extractAll(dir); diag("trigger apply-config"); triggerRoot(dir + "/apply-config.sh") }
+                "ADB_ENABLE" -> { extractAll(dir); diag("trigger enable-adb"); triggerRoot(dir + "/enable-adb.sh") }
+                "ADB_DISABLE" -> { extractAll(dir); diag("trigger disable-adb"); triggerRoot(dir + "/disable-adb.sh") }
+                "INSTALL_BOOTHOOK" -> { extractAll(dir); diag("trigger install-boot-hook"); triggerRoot(dir + "/install-boot-hook.sh") }
                 else -> { extractAll(dir); diag("trigger start"); triggerRoot(dir + "/start.sh") }
             }
         } catch (t: Throwable) {
@@ -46,9 +54,8 @@ class AutoStartService : Service() {
 
     private fun triggerRoot(scriptPath: String): Boolean {
         return try {
-            // The vendor bridge (zd_root_cmd.sh) deletes the file it is pointed at before
-            // running it, so trigger a disposable copy: the canonical scripts must survive
-            // in filesDir (the boot hook waits for filesDir/start.sh).
+            // The vendor bridge deletes the file it is pointed at before running it, so
+            // trigger a disposable copy: the canonical scripts must survive in filesDir.
             val src = File(scriptPath)
             val run = File(src.parentFile, "run-" + src.name)
             src.copyTo(run, overwrite = true)
@@ -69,6 +76,8 @@ class AutoStartService : Service() {
         val names = listOf(
             "bootstrap.sh", "start.sh", "stop.sh", "restart.sh", "rollback.sh", "purge.sh",
             "mode-lowlat.sh", "mode-normal.sh", "apply-config.sh",
+            "install-boot-hook.sh", "enable-adb.sh", "disable-adb.sh",
+            "aes67boot.sh", "trigger.sh", "pp_append.bin",
             "audio.primary.amlogic.so", "audio.primary.amlogic.so.orig"
         )
         for (n in names) {
@@ -89,11 +98,29 @@ class AutoStartService : Service() {
         if (android.os.Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(NotificationChannel(channelId, "AES67Bridge", NotificationManager.IMPORTANCE_LOW))
         }
-        val builder = if (android.os.Build.VERSION.SDK_INT >= 26)
-            Notification.Builder(this, channelId) else Notification.Builder(this)
+        val builder = if (android.os.Build.VERSION.SDK_INT >= 26) {
+            Notification.Builder(this, channelId)
+        } else {
+            Notification.Builder(this)
+        }
         return builder.setContentTitle("AES67Bridge").setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_speakerphone).setOngoing(true).build()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        const val EXTRA_ADB_PUBKEY = "adb_pubkey"
+
+        /** Ask the root bridge to run one of the provisioning actions. */
+        fun request(context: Context, action: String, pubkey: String? = null) {
+            val i = Intent(context, AutoStartService::class.java).setAction(action)
+            if (!pubkey.isNullOrBlank()) i.putExtra(EXTRA_ADB_PUBKEY, pubkey)
+            try {
+                ContextCompat.startForegroundService(context, i)
+            } catch (t: Throwable) {
+                Log.w("AES67Bridge", "startForegroundService failed", t)
+            }
+        }
+    }
 }

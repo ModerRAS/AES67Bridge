@@ -21,8 +21,8 @@ android {
         applicationId = "dev.aes67bridge.tv"
         minSdk = 30
         targetSdk = 30
-        versionCode = 11
-        versionName = "0.2.9"
+        versionCode = 12
+        versionName = "0.3.0"
     }
     signingConfigs {
         if (keystoreProps.isNotEmpty()) {

@@ -154,7 +154,9 @@ object UpdateManager {
             val dir = File(context.cacheDir, "updates").apply { mkdirs() }
             if (release.daemonAvailable) {
                 status = "下载守护进程 v" + (release.daemonVersion ?: release.versionName) + "…"
-                val daemon = download(release.daemonUrl!!, File(dir, "aes67-daemon"), release.daemonSha256, 0)
+                // Download into the persistent app dir: on 0.3.0+ this copy is the seed both
+                // for the runtime tmpfs and for the boot hook after a reboot.
+                val daemon = download(release.daemonUrl!!, File(context.filesDir, "aes67-daemon.download"), release.daemonSha256, 0)
                 status = "安装守护进程…"
                 val ok = installDaemon(context, daemon)
                 status = if (ok) "守护进程已更新" else "守护进程更新失败（继续更新 App）"
@@ -266,11 +268,20 @@ object UpdateManager {
         log.writeText("")
         log.setReadable(true, false)
         val script = File(context.filesDir, "update-daemon.sh")
+        val appDir = context.filesDir.absolutePath
         script.writeText(
             "#!/system/bin/sh\n" +
                 "set -u\n" +
+                "APP='" + appDir + "'\n" +
                 "echo START >> '" + log.absolutePath + "'\n" +
-                "cp -f '" + daemon.absolutePath + "' /data/aes67bridge/.aes67-daemon.new || { echo CPFAIL >> '" + log.absolutePath + "'; exit 1; }\n" +
+                // 1) persistent copy (seed for the boot hook / tmpfs runtime)
+                "cp -f '" + daemon.absolutePath + "' \"\$APP/.aes67-daemon.new\" || { echo CPFAIL >> '" + log.absolutePath + "'; exit 1; }\n" +
+                "OWNER=\$(stat -c '%u:%g' \"\$APP\" 2>/dev/null); [ -n \"\$OWNER\" ] || OWNER=10082:10082\n" +
+                "chown \"\$OWNER\" \"\$APP/.aes67-daemon.new\"\n" +
+                "chmod 0755 \"\$APP/.aes67-daemon.new\"\n" +
+                "mv -f \"\$APP/.aes67-daemon.new\" \"\$APP/aes67-daemon\"\n" +
+                // 2) runtime copy (temp + rename: never rewrite a mapped binary in place)
+                "cp -f \"\$APP/aes67-daemon\" /data/aes67bridge/.aes67-daemon.new || { echo CPFAIL >> '" + log.absolutePath + "'; exit 1; }\n" +
                 "chown root:root /data/aes67bridge/.aes67-daemon.new\n" +
                 "chmod 0750 /data/aes67bridge/.aes67-daemon.new\n" +
                 "mv -f /data/aes67bridge/.aes67-daemon.new /data/aes67bridge/aes67-daemon\n" +
@@ -280,7 +291,12 @@ object UpdateManager {
         script.setReadable(true, false)
         script.setExecutable(true, false)
         if (!triggerRoot(script.absolutePath)) return false
-        return waitFor(log, "OK", 30_000)
+        val ok = waitFor(log, "OK", 30_000)
+        if (ok) {
+            // keep the verified daemon in filesDir as the persistent seed; drop the download
+            daemon.delete()
+        }
+        return ok
     }
 
     /** Install the downloaded APK with pm install through the root bridge. */

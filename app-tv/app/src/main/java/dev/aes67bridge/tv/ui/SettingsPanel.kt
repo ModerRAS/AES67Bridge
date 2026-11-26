@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.aes67bridge.tv.AutoStartService
 import dev.aes67bridge.tv.UpdateManager
 import java.io.File
 import kotlinx.coroutines.launch
@@ -49,6 +50,14 @@ private val PAccent = Color(0xFF35D0A5)
 private val PDim = Color(0xFF7E92A6)
 private val PText = Color(0xFFEAF2FA)
 private val PLine = Color(0xFF2A3947)
+
+/** Tail of the root-side tool result log (install hook / enable ADB etc.). */
+private fun readToolResult(ctx: android.content.Context): String = try {
+    val f = File(ctx.filesDir, "tool-result.txt")
+    if (!f.exists()) "" else f.readLines().takeLast(14).joinToString("\n")
+} catch (t: Throwable) {
+    ""
+}
 
 /** 布局是唯一真相：声道数与通道标签都由它派生，不允许布局和声道各选各的。 */
 private val LayoutCh = linkedMapOf(
@@ -252,7 +261,7 @@ private fun KeypadContent(
 @Composable
 fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     val ctx = LocalContext.current
-    val cats = listOf("输出", "信号", "延迟/时钟", "系统")
+    val cats = listOf("输出", "信号", "延迟/时钟", "系统", "装机")
     var cat by remember { mutableStateOf(0) }
 
     val vals = remember {
@@ -296,6 +305,8 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
     var gPort by remember { mutableStateOf("") }
     var gmAddr by remember { mutableStateOf("") }
     var gmDomain by remember { mutableStateOf("") }
+    var adbConfirm by remember { mutableStateOf(false) }
+    var toolResult by remember { mutableStateOf(readToolResult(ctx)) }
 
     Dialog(
         onDismissRequest = {
@@ -583,6 +594,41 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                                     Hint(UpdateManager.status)
                                 }
                             }
+                            if (cat == 4) {
+                                Hint("装机工具：把 /data/aes67bridge 切到内存盘（重启后生效），或者打开无线 ADB。打开 ADB 后本机可在局域网内被 root 控制，请只在可信网络使用。")
+                                RowLabel("运行时") {
+                                    OptChip("安装/修复开机自启", accent = true) {
+                                        AutoStartService.request(ctx, "INSTALL_BOOTHOOK")
+                                        toolResult = readToolResult(ctx)
+                                    }
+                                    OptChip("查看结果") { toolResult = readToolResult(ctx) }
+                                }
+                                Hint("写入 /data/aes67bridge.persist/boot 启动钩子并把运行时切到 tmpfs；App 私有目录仍是唯一持久层，重启后自动恢复")
+                                RowLabel("无线 ADB") {
+                                    OptChip("开启（会 root）") { adbConfirm = true }
+                                    OptChip("关闭") {
+                                        AutoStartService.request(ctx, "ADB_DISABLE")
+                                        toolResult = readToolResult(ctx)
+                                    }
+                                }
+                                Hint("开启会重启 adbd（约 2 秒）；之后电脑可 adb connect <盒子IP>:5555，adb root 即 uid=0。不用时请关闭。")
+                                RowLabel("公钥") {
+                                    Text(
+                                        if (File(ctx.filesDir, "adb_pubkey.txt").exists())
+                                            "已提供 adb_pubkey.txt"
+                                        else
+                                            "未提供（可把电脑 adbkey.pub 的一行放进 App 私有目录 adb_pubkey.txt）",
+                                        color = PDim, fontSize = 12.sp,
+                                        modifier = Modifier.padding(vertical = 6.dp)
+                                    )
+                                }
+                                if (toolResult.isNotEmpty()) {
+                                    Text(
+                                        toolResult, color = Color(0xFF8FA3B6), fontSize = 11.sp,
+                                        lineHeight = 15.sp, modifier = Modifier.padding(top = 8.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                     Spacer(Modifier.height(12.dp))
@@ -653,6 +699,37 @@ fun SettingsPanel(onClose: () -> Unit, onApply: (Map<String, String>) -> Unit) {
                 4 -> KeypadContent("端口", gPort, false, { page = 1 }, { gPort = it; page = 1 })
                 5 -> KeypadContent("GM 地址", gmAddr, true, { page = 2 }, { gmAddr = it; page = 2 })
                 else -> KeypadContent("domain", gmDomain, false, { page = 2 }, { gmDomain = it; page = 2 })
+            }
+        }
+    }
+
+    if (adbConfirm) {
+        Dialog(onDismissRequest = { adbConfirm = false }) {
+            Column(
+                Modifier
+                    .width(560.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(PBg)
+                    .border(1.dp, PLine, RoundedCornerShape(18.dp))
+                    .padding(22.dp)
+            ) {
+                Text("开启无线 ADB", color = PText, fontSize = 20.sp)
+                Text(
+                    "这会打开厂商 ADB 门闩（persist.zidoo.test.dc）并重启 adbd：本机将可在局域网内被 root 控制，等同把 root 暴露给同网段设备。只在可信网络使用，不用时请关闭。",
+                    color = PDim, fontSize = 12.sp, lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 16.dp)
+                ) {
+                    OptChip("取消") { adbConfirm = false }
+                    OptChip("确认开启", accent = true) {
+                        adbConfirm = false
+                        AutoStartService.request(ctx, "ADB_ENABLE")
+                        toolResult = readToolResult(ctx)
+                    }
+                }
             }
         }
     }

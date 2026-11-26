@@ -30,9 +30,13 @@ fi
 chown root:root "$ROOT/daemon.conf" "$ROOT/state.txt" "$ROOT/mode.txt" 2>/dev/null
 chmod 0644 "$ROOT/daemon.conf" "$ROOT/state.txt" "$ROOT/mode.txt"
 
-# 1) tmpfs upper for the /vendor/lib/hw overlay (RAM only; /data ext4 cannot be overlay upper here)
+# 1) tmpfs upper for the /vendor/lib/hw overlay. In the 0.3.0 layout the whole
+#    runtime dir already lives on tmpfs, so $OVL is tmpfs-backed and only the
+#    legacy ext4 layout needs its own tmpfs mount here.
 mkdir -p "$OVL"
-if ! grep -q " $OVL tmpfs " /proc/mounts; then
+if grep -q " $ROOT tmpfs " /proc/mounts; then
+  echo "runtime is tmpfs; $OVL needs no extra tmpfs"
+elif ! grep -q " $OVL tmpfs " /proc/mounts; then
   mount -t tmpfs -o size=64m,mode=755 tmpfs "$OVL" || echo "tmpfs mount FAILED"
 fi
 mkdir -p "$UPPER" "$WORK"

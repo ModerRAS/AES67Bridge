@@ -1,4 +1,4 @@
-﻿# build outputs
+# build outputs
 out/
 classes/
 target/
@@ -40,3 +40,5 @@ daemon-rs/vendor/eac3/
 *.orig
 app-tv/build.log
 app-tv/app/src/main/assets/audio.primary.amlogic.so
+# ...but the boot-hook property fragment is a tiny checked-in asset (not a vendor blob)
+!app-tv/app/src/main/assets/pp_append.bin
