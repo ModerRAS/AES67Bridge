@@ -87,6 +87,10 @@ pub struct Snapshot<'a> {
     pub ptp_domain: u8,
     pub sap: bool,
     pub sap_interval_s: u32,
+    /// Runtime last-stage attenuation in dB (0.0 .. -60.0), applied after the limiter.
+    pub trim_db: f32,
+    /// True when the runtime trim is muted.
+    pub muted: bool,
     pub bits: Option<&'a BitsStatus<'a>>,
 }
 
@@ -150,19 +154,26 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
     out.push_str("],");
     let _ = write!(
         out,
-        "\"src\":{{\"rs_in\":{},\"rs_out\":{},\"active\":{},\"age_ms\":{},\"codec\":\"{}\",\"rate\":{}}},\"levels\":[",
+        "\"src\":{{\"rs_in\":{},\"rs_out\":{},\"active\":{},\"age_ms\":{},\"codec\":\"{}\",\"rate\":{}}},\"volume\":{{\"trim_db\":{:.2},\"muted\":{}}},\"levels\":[",
         snapshot.rs_in,
         snapshot.rs_out,
         u8::from(snapshot.src_active),
         snapshot.src_age_ms,
         snapshot.src_codec,
-        snapshot.src_rate
+        snapshot.src_rate,
+        snapshot.trim_db,
+        u8::from(snapshot.muted)
     );
     for (i, level) in snapshot.levels.iter().enumerate() {
         if i != 0 {
             out.push(',');
         }
-        let _ = write!(out, "{level:.2}");
+        let adjusted = if snapshot.muted {
+            -120.0
+        } else {
+            (*level + snapshot.trim_db as f64).max(-120.0)
+        };
+        let _ = write!(out, "{adjusted:.2}");
     }
     let _ = write!(
         out,
@@ -184,6 +195,11 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
         snapshot.rate_ppm,
         snapshot.fit_rms_ns
     );
+    let trim_linear = if snapshot.muted {
+        0.0
+    } else {
+        10f32.powf(snapshot.trim_db / 20.0)
+    };
     if let Some(bits) = snapshot.bits {
         let _ = writeln!(
             out,
@@ -196,7 +212,7 @@ pub fn render(snapshot: &Snapshot<'_>) -> String {
             bits.decode_errors,
             bits.extract_errors,
             bits.limited,
-            bits.out_peak,
+            bits.out_peak * trim_linear,
             bits.dialnorm_db
         );
     } else {
@@ -380,6 +396,8 @@ mod tests {
             ptp_domain: 0,
             sap: false,
             sap_interval_s: 30,
+            trim_db: 0.0,
+            muted: false,
             bits: None,
         };
         let text = render(&snapshot);

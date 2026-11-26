@@ -26,6 +26,7 @@ use crate::platform;
 use crate::resample::{Passthrough, PolyphaseResampler, Resampler, RubatoResampler};
 use crate::source::{self, Wait};
 use crate::status::{self, FlowStatus, Snapshot};
+use crate::trim::{self as trimmod, Trim};
 use crate::{logln, MAX_RTP_PAYLOAD};
 
 pub const EXIT_OK: i32 = 0;
@@ -114,6 +115,8 @@ pub struct Daemon {
     shared: Arc<SharedState>,
     /// Effective PTP mode after startup: local / unicast / multicast.
     ptp_mode: &'static str,
+    /// Runtime remote-control attenuation, applied at the last stage (after the limiter).
+    trim: Arc<Trim>,
 }
 
 impl Daemon {
@@ -123,6 +126,7 @@ impl Daemon {
             cfg,
             shared: SharedState::new(),
             ptp_mode: "local",
+            trim: Arc::new(Trim::new(Trim::default_path())),
         })
     }
 
@@ -148,6 +152,11 @@ impl Daemon {
         }
         platform::init_timer_resolution();
         platform::install_stop_handlers();
+        logln!(
+            "volume trim {:.2} dB muted={} (last-stage attenuation applied before AES67 submit)",
+            self.trim.db(),
+            self.trim.muted()
+        );
         for note in &cfg.notes {
             logln!("WARN {note}");
         }
@@ -229,6 +238,14 @@ impl Daemon {
             }
             Err(err) => logln!("WARN status socket bind failed: {err}"),
         }
+        match crate::ctl::init(Arc::clone(&self.trim)) {
+            Ok(()) => logln!("control socket @{}", crate::ctl::SOCKET_NAME),
+            Err(err) => logln!("WARN control socket bind failed: {err}"),
+        }
+        match crate::keys::init(Arc::clone(&self.trim)) {
+            Ok(()) => logln!("volume keys: passive evdev reader started"),
+            Err(err) => logln!("WARN volume keys disabled: {err}"),
+        }
         if cfg.sched_fifo > 0 {
             let rc = platform::sched_fifo(cfg.sched_fifo);
             logln!("SCHED_FIFO prio={} rc={}", cfg.sched_fifo, rc);
@@ -254,6 +271,7 @@ impl Daemon {
     /// lets aes67-daemon (or any SAP browser) discover and configure the source at
     /// any time, not just while music/movie is playing.
     fn run_idle_session(&mut self, cfg: &Config) -> Result<i32, (i32, String)> {
+        let trim = Arc::clone(&self.trim);
         let layout_id = cfg.layout.trim();
         if layout_id.is_empty() {
             return Err((EXIT_USAGE, "idle session needs a configured layout".to_string()));
@@ -345,7 +363,7 @@ impl Daemon {
                     src_rate: crate::OUT_RATE,
                     _marker: std::marker::PhantomData,
                 };
-                write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None);
+                write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None, &trim);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -413,7 +431,7 @@ impl Daemon {
                         Err((EXIT_USAGE, message)) => return Err((EXIT_USAGE, message)),
                         Err((code, message)) => {
                             logln!("WARN AUTO idle session failed code={code}: {message}");
-                            write_idle_status(cfg, self.ptp_mode);
+                            write_idle_status(cfg, self.ptp_mode, self.trim.as_ref());
                             std::thread::sleep(Duration::from_millis(500));
                         }
                     }
@@ -428,6 +446,7 @@ impl Daemon {
     /// source, or after the stream has been silent for `AUTO_IDLE`.
     fn run_pcm(&mut self, cfg: &Config, auto: bool) -> Result<i32, (i32, String)> {
         let cfg = cfg.clone();
+        let trim = Arc::clone(&self.trim);
         let group_ip = cfg.group_ip();
         let local_ip = cfg.local_ip.unwrap_or_else(|| {
             platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED)
@@ -787,7 +806,7 @@ impl Daemon {
                         &mut pcm_dump,
                     );
                 }
-                if let Err(err) = submitter.flush(active) {
+                if let Err(err) = submitter.flush(active, trim.as_ref()) {
                     if !submit_warned {
                         submit_warned = true;
                         logln!("WARN PCM submit failed: {err}");
@@ -805,6 +824,7 @@ impl Daemon {
                         &current,
                         self.ptp_mode,
                         None,
+                        trim.as_ref(),
                     );
                     meter.reset();
                 }
@@ -879,7 +899,7 @@ impl Daemon {
                 render_stage.as_mut(),
                 &mut pcm_dump,
             );
-            let _ = submitter.flush(active);
+            let _ = submitter.flush(active, trim.as_ref());
             write_status(
                 active,
                 &cfg,
@@ -889,6 +909,7 @@ impl Daemon {
                 &current,
                 self.ptp_mode,
                 None,
+                trim.as_ref(),
             );
             if result.is_ok() {
                 std::thread::sleep(Duration::from_millis(50));
@@ -924,6 +945,8 @@ impl Daemon {
         use std::collections::VecDeque;
         use std::sync::atomic::AtomicU64;
 
+        let trim = Arc::clone(&self.trim);
+
         // Open the HAL tee FIFO unconditionally at startup: meta can be stale
         // or missing until playback starts, but the bytes on live.bits are the
         // real trigger. Bytes are buffered until the codec is identified, so a
@@ -958,7 +981,7 @@ impl Daemon {
             // The TV app treats a stale status.json as "daemon not running".
             if now - last_heartbeat > 500_000_000 {
                 last_heartbeat = now;
-                write_idle_status(cfg, if cfg.ptp { "multicast" } else { "local" });
+                write_idle_status(cfg, if cfg.ptp { "multicast" } else { "local" }, trim.as_ref());
             }
             // Keep the FIFO drained while the codec is unknown (bounded memory).
             if prefetched.len() < 8 * 1024 * 1024 {
@@ -1159,7 +1182,7 @@ impl Daemon {
                                warned: &mut bool|
          -> bool {
             while queue.len() >= chunk_samples {
-                let chunk: Vec<f32> = queue.iter().take(chunk_samples).copied().collect();
+                let mut chunk: Vec<f32> = queue.iter().take(chunk_samples).copied().collect();
                 // E-AC-3 bursts often decode faster than real time; wait for
                 // ring space instead of dropping most of the burst (QUEUE_FULL).
                 let mut waited = 0u32;
@@ -1173,7 +1196,14 @@ impl Daemon {
                 let mut attempts = 0u32;
                 loop {
                     rc = unsafe {
-                        session.submit(*first, chunk.as_ptr(), chunk_frames, source_channels)
+                        trimmod::submit_trimmed(
+                            session,
+                            trim.as_ref(),
+                            *first,
+                            &mut chunk,
+                            chunk_frames,
+                            source_channels,
+                        )
                     };
                     if rc != -7 || attempts >= 500 {
                         break;
@@ -1306,7 +1336,7 @@ impl Daemon {
                         src_rate: 48_000,
                         _marker: std::marker::PhantomData,
                     };
-                    write_status(&session, cfg, &plan, &parts, queue.len() / source_channels, &shape, self.ptp_mode, None);
+                    write_status(&session, cfg, &plan, &parts, queue.len() / source_channels, &shape, self.ptp_mode, None, trim.as_ref());
                     meter.reset();
                     logln!(
                         "BITS STAT bytes={} frames_decoded={} submitted={} queue_frames={} decoder_errors={} nonzero_samples={} send_err={} ring_fill={} drops={} silent={}",
@@ -1348,7 +1378,7 @@ impl Daemon {
             src_rate: 48_000,
             _marker: std::marker::PhantomData,
         };
-        write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None);
+        write_status(&session, cfg, &plan, &parts, 0, &shape, self.ptp_mode, None, &trim);
         let counters = session.counters();
         logln!(
             "BITS EXIT bytes={} decoded_frames={} submitted={} decoder_errors={} nonzero_samples={} eofs={} send_err={} drops={} silent={}",
@@ -1381,6 +1411,7 @@ impl Daemon {
         mut bits_source: source::Source,
         mut prefetched: Vec<u8>,
     ) -> Result<i32, (i32, String)> {
+        let trim = Arc::clone(&self.trim);
         let target = cfg.layout.trim().to_string();
         if target.is_empty() {
             return Err((
@@ -1637,7 +1668,9 @@ impl Daemon {
                         let mut rc = 0;
                         let mut attempts = 0u32;
                         loop {
-                            rc = unsafe { active.submit(first, chunk.as_ptr(), frames, channels) };
+                            rc = unsafe {
+                                trimmod::submit_trimmed(active, trim.as_ref(), first, &mut chunk, frames, channels)
+                            };
                             if rc != -7 || attempts >= 500 {
                                 break;
                             }
@@ -1705,7 +1738,7 @@ impl Daemon {
                             dialnorm_db: pipeline.dialnorm_gain_db(),
                             _marker: std::marker::PhantomData,
                         };
-                        write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
+                        write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view), trim.as_ref());
                         meter.reset();
                         logln!(
                             "TRUEHD STAT bytes={} blocks={} frames={} objects={} send_err={} ring_fill={} decode_errors={} extract_errors={} limited={} out_peak={:.3} limiter_delay={} dialnorm={:.2}dB",
@@ -1723,7 +1756,7 @@ impl Daemon {
                             pipeline.dialnorm_gain_db()
                         );
                     } else {
-                        write_idle_status(cfg, self.ptp_mode);
+                        write_idle_status(cfg, self.ptp_mode, self.trim.as_ref());
                     }
                 }
                 if read == 0 {
@@ -1787,7 +1820,7 @@ impl Daemon {
                 dialnorm_db: pipeline.dialnorm_gain_db(),
                 _marker: std::marker::PhantomData,
             };
-            write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view));
+            write_status(active, cfg, &plan, &parts, 0, current, self.ptp_mode, Some(&bits_view), trim.as_ref());
         }
         push_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let p50 = percentile(&push_ms, 0.50);
@@ -1939,20 +1972,24 @@ impl Submitter {
         self.frames += frames;
     }
 
-    fn flush(&mut self, session: &Session) -> Result<(), String> {
+    fn flush(&mut self, session: &Session, trim: &Trim) -> Result<(), String> {
         while self.frames > 0 {
             // 480 frames = 10 ms at 48 kHz, well below the ring capacity.
             let chunk = self.frames.min(480);
             let slice_len = chunk * self.channels;
+            let first = self.first;
+            let channels = self.channels;
             let mut rc;
             let mut retries = 0u32;
             loop {
                 rc = unsafe {
-                    session.submit(
-                        self.first,
-                        self.pending.as_ptr(),
+                    trimmod::submit_trimmed(
+                        session,
+                        trim,
+                        first,
+                        &mut self.pending[..slice_len],
                         chunk,
-                        self.channels,
+                        channels,
                     )
                 };
                 if rc == 0 {
@@ -2723,7 +2760,7 @@ fn auto_source(cfg: &Config) -> AutoSource {
     }
 }
 
-fn write_idle_status(cfg: &Config, ptp_mode: &str) {
+fn write_idle_status(cfg: &Config, ptp_mode: &str, trim: &Trim) {
     let layout = if cfg.layout.trim().is_empty() {
         cfg.effective_layout()
     } else {
@@ -2822,6 +2859,8 @@ fn write_idle_status(cfg: &Config, ptp_mode: &str) {
         ptp_domain: cfg.effective_ptp_domain(),
         sap: cfg.sap,
         sap_interval_s: cfg.sap_interval_s,
+        trim_db: trim.db(),
+        muted: trim.muted(),
         bits: if include_bits { Some(&bits_view) } else { None },
     };
     status::publish(&snapshot);
@@ -2836,6 +2875,7 @@ fn write_status(
     shape: &StreamShape,
     ptp_mode: &str,
     bits: Option<&status::BitsStatus<'_>>,
+    trim: &Trim,
 ) {
     let counters = session.counters();
     let flow_status: Vec<FlowStatus> = plan
@@ -2924,6 +2964,8 @@ fn write_status(
         ptp_domain: cfg.effective_ptp_domain(),
         sap: cfg.sap,
         sap_interval_s: cfg.sap_interval_s,
+        trim_db: trim.db(),
+        muted: trim.muted(),
         bits,
     };
     status::publish(&snapshot);

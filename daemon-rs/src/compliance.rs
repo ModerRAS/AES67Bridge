@@ -825,6 +825,8 @@ fn check_status_contract() -> Result<String, String> {
         ptp_domain: 0,
         sap: false,
         sap_interval_s: 30,
+        trim_db: 0.0,
+        muted: false,
         bits: None,
     };
     let standard = render(&base);

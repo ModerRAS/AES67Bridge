@@ -17,6 +17,8 @@
 //!   operation, exactly like the C daemon).
 
 pub mod compliance;
+pub mod ctl;
+pub mod keys;
 pub mod bitstream;
 pub mod config;
 pub mod daemon;
@@ -28,6 +30,7 @@ pub mod platform;
 pub mod resample;
 pub mod source;
 pub mod status;
+pub mod trim;
 
 pub mod sinc_poly;
 
