@@ -59,17 +59,41 @@ else
   echo "stage md5:"; md5sum "$STAGE/audio.primary.amlogic.so" "$STAGE/audio.primary.amlogic.so.orig" 2>&1
 fi
 
-# 3) mount overlay over /vendor/lib/hw; restart HAL only when newly mounted
+# 3) mount overlay over /vendor/lib/hw, publish the stage tee through the MERGED
+#    path, and restart the HAL when the merged .so actually changed.
+#    Writing $UPPER/audio.primary.amlogic.so directly does NOT refresh the merged
+#    dentry while the overlay is mounted: /vendor/lib/hw keeps serving the old
+#    inode until the overlay is remounted (a reboot).  A hot update therefore has
+#    to go through /vendor/lib/hw/audio.primary.amlogic.so.
+mounted=0
 if grep -q " /vendor/lib/hw overlay" /proc/mounts; then
   echo "overlay already mounted"
 else
   mount -t overlay overlay -o lowerdir=/vendor/lib/hw,upperdir=$UPPER,workdir=$WORK /vendor/lib/hw
   echo "overlay mount rc=$?"
+  mounted=1
+fi
+before=
+if [ -f /vendor/lib/hw/audio.primary.amlogic.so ]; then
+  before=$(md5sum /vendor/lib/hw/audio.primary.amlogic.so | cut -d' ' -f1)
+fi
+if [ -f "$STAGE/audio.primary.amlogic.so" ]; then
+  cp -f "$STAGE/audio.primary.amlogic.so" /vendor/lib/hw/audio.primary.amlogic.so
+  chmod 0755 /vendor/lib/hw/audio.primary.amlogic.so
+fi
+if [ -f "$STAGE/audio.primary.amlogic.so.orig" ]; then
+  cp -f "$STAGE/audio.primary.amlogic.so.orig" /vendor/lib/hw/audio.primary.amlogic.so.orig
+  chmod 0755 /vendor/lib/hw/audio.primary.amlogic.so.orig
+fi
+after=$(md5sum /vendor/lib/hw/audio.primary.amlogic.so 2>/dev/null | cut -d' ' -f1)
+echo "merged md5: $before -> $after"
+echo "merged:"; ls -l /vendor/lib/hw/audio.primary.amlogic.so* 2>&1
+md5sum /vendor/lib/hw/audio.primary.amlogic.so 2>&1
+if [ "$mounted" = "1" ] || [ "$before" != "$after" ]; then
+  echo "HAL restart required (fresh mount or tee changed)"
   setprop ctl.restart vendor.audio-hal
   sleep 3
 fi
-echo "merged:"; ls -l /vendor/lib/hw/audio.primary.amlogic.so* 2>&1
-md5sum /vendor/lib/hw/audio.primary.amlogic.so 2>&1
 
 # 4) AES67 mode from daemon.conf (single source of truth; default = standard 20ms)
 hal_buf=20; pcm_export=1; bits_export=1
