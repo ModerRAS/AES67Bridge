@@ -153,9 +153,10 @@ impl Daemon {
         platform::init_timer_resolution();
         platform::install_stop_handlers();
         logln!(
-            "volume trim {:.2} dB muted={} (last-stage attenuation applied before AES67 submit)",
+            "volume trim {:.2} dB muted={} state={:?} (last-stage attenuation applied before AES67 submit)",
             self.trim.db(),
-            self.trim.muted()
+            self.trim.muted(),
+            self.trim.state_path()
         );
         for note in &cfg.notes {
             logln!("WARN {note}");

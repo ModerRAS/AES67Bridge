@@ -63,6 +63,7 @@ class VolumeOsdService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     @Volatile private var running = false
+    @Volatile private var socketRef: LocalSocket? = null
     private var reader: Thread? = null
     private var windowManager: WindowManager? = null
     private var overlay: View? = null
@@ -89,6 +90,10 @@ class VolumeOsdService : Service() {
 
     override fun onDestroy() {
         running = false
+        try {
+            socketRef?.close()
+        } catch (_: Throwable) {
+        }
         reader?.interrupt()
         destroyOverlay()
         super.onDestroy()
@@ -118,6 +123,7 @@ class VolumeOsdService : Service() {
                 socket.connect(
                     LocalSocketAddress(SOCKET, LocalSocketAddress.Namespace.ABSTRACT),
                 )
+                socketRef = socket
                 var first = true
                 socket.inputStream.bufferedReader().use { input ->
                     while (running) {
@@ -139,6 +145,7 @@ class VolumeOsdService : Service() {
             } catch (_: Throwable) {
                 // daemon not up yet, or the socket was replaced
             } finally {
+                if (socketRef === socket) socketRef = null
                 try {
                     socket?.close()
                 } catch (_: Throwable) {

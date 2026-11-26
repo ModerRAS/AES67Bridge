@@ -58,12 +58,35 @@ impl Trim {
     }
 
     /// Persisted path used when AES67_VOLUME_STATE is not set.
+    ///
+    /// Preference: the app's private dir (same persistent layer as
+    /// `daemon.conf`). If root cannot write there (SELinux/ownership on some
+    /// firmware), fall back to the root-owned persist dir instead of silently
+    /// losing the level across restarts.
     pub fn default_path() -> Option<PathBuf> {
         match std::env::var("AES67_VOLUME_STATE") {
             Ok(value) if value == "off" => None,
             Ok(value) if !value.is_empty() => Some(PathBuf::from(value)),
-            _ => Some(PathBuf::from(DEFAULT_STATE)),
+            _ => {
+                let preferred = PathBuf::from(DEFAULT_STATE);
+                if dir_writable(
+                    preferred
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/data/user/0/dev.aes67bridge.tv/files")),
+                ) {
+                    Some(preferred)
+                } else if dir_writable(Path::new("/data/aes67bridge.persist")) {
+                    Some(PathBuf::from("/data/aes67bridge.persist/volume.state"))
+                } else {
+                    None
+                }
+            }
         }
+    }
+
+    /// Path of the persisted state file (None when persistence is off).
+    pub fn state_path(&self) -> Option<&Path> {
+        self.state_path.as_deref()
     }
 
     /// Target level in dB (0.0 .. -60.0). Looks the same while muted.
@@ -224,6 +247,20 @@ impl Trim {
             return;
         }
         let _ = fs::rename(&tmp, path);
+    }
+}
+
+fn dir_writable(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let probe = path.join(".volume.probe");
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
