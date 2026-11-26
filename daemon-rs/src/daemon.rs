@@ -161,9 +161,6 @@ impl Daemon {
         let local_ip = cfg
             .local_ip
             .unwrap_or_else(|| platform::detect_local_ip(group_ip, cfg.port).unwrap_or(Ipv4Addr::UNSPECIFIED));
-        if cfg.resampler == crate::config::ResamplerKind::Rubato {
-            logln!("WARN resampler=rubato selected; the 44.1k rubato path has an open white-noise report, c-poly is the tested/default resampler");
-        }
         let encoding = if cfg.encoding == Encoding::L24 {
             RtpEncoding::L24
         } else {
@@ -461,6 +458,19 @@ impl Daemon {
         };
         let mut carry: Vec<u8> = Vec::with_capacity(128);
         let mut meter = LevelMeter::default();
+        // Optional diagnostic: dump the exact PCM frames handed to the session
+        // (after resampling) as 24-bit big-endian, the same format as the RTP payload.
+        let mut pcm_dump = if cfg.dump_pcm.is_empty() {
+            None
+        } else {
+            match std::fs::File::create(&cfg.dump_pcm) {
+                Ok(file) => Some(file),
+                Err(err) => {
+                    logln!("WARN create --dump-pcm {} failed: {err}", cfg.dump_pcm);
+                    None
+                }
+            }
+        };
 
         let mut bytes_read: u64 = 0;
         let mut reads: u64 = 0;
@@ -683,6 +693,7 @@ impl Daemon {
                             &mut meter,
                             &mut submitter,
                             render_stage.as_mut(),
+                            &mut pcm_dump,
                         );
                     }
                     if consumed > 0 {
@@ -701,6 +712,7 @@ impl Daemon {
                         &mut meter,
                         &mut submitter,
                         render_stage.as_mut(),
+                        &mut pcm_dump,
                     );
                     std::thread::sleep(Duration::from_millis(20));
                 } else if platform::now_ns() - last_data_ns > 500_000_000 {
@@ -714,6 +726,7 @@ impl Daemon {
                         &mut meter,
                         &mut submitter,
                         render_stage.as_mut(),
+                        &mut pcm_dump,
                     );
                 }
                 if let Err(err) = submitter.flush(active) {
@@ -787,6 +800,7 @@ impl Daemon {
                                 &mut meter,
                                 &mut submitter,
                                 render_stage.as_mut(),
+                                &mut pcm_dump,
                             );
                         }
                     }
@@ -804,6 +818,7 @@ impl Daemon {
                 &mut meter,
                 &mut submitter,
                 render_stage.as_mut(),
+                &mut pcm_dump,
             );
             let _ = submitter.flush(active);
             write_status(
@@ -2026,8 +2041,21 @@ fn feed_frame(
     meter: &mut LevelMeter,
     submitter: &mut Submitter,
     mut render_stage: Option<&mut PcmRenderStage>,
+    dump: &mut Option<std::fs::File>,
 ) {
+    let mut dump_frame = |out: &[i32; MAX_CH]| {
+        if let Some(file) = dump.as_mut() {
+            use std::io::Write as _;
+            let mut bytes = Vec::with_capacity(channels * 3);
+            for channel in 0..channels {
+                let be = out[channel].to_be_bytes();
+                bytes.extend_from_slice(&be[1..4]);
+            }
+            let _ = file.write_all(&bytes);
+        }
+    };
     if rate == crate::OUT_RATE {
+        dump_frame(frame);
         match render_stage.as_mut() {
             Some(stage) => stage.push(frame, channels, meter, submitter),
             None => {
@@ -2036,11 +2064,14 @@ fn feed_frame(
             }
         }
     } else {
-        let mut sink = |out: &[i32; MAX_CH]| match render_stage.as_mut() {
-            Some(stage) => stage.push(out, channels, meter, submitter),
-            None => {
-                meter.add_frame(out, channels);
-                submitter.push(out, channels);
+        let mut sink = |out: &[i32; MAX_CH]| {
+            dump_frame(out);
+            match render_stage.as_mut() {
+                Some(stage) => stage.push(out, channels, meter, submitter),
+                None => {
+                    meter.add_frame(out, channels);
+                    submitter.push(out, channels);
+                }
             }
         };
         resampler.push(frame, channels, &mut sink);
@@ -2053,13 +2084,25 @@ fn flush_frames(
     meter: &mut LevelMeter,
     submitter: &mut Submitter,
     mut render_stage: Option<&mut PcmRenderStage>,
+    dump: &mut Option<std::fs::File>,
 ) {
     {
-        let mut sink = |out: &[i32; MAX_CH]| match render_stage.as_mut() {
-            Some(stage) => stage.push(out, channels, meter, submitter),
-            None => {
-                meter.add_frame(out, channels);
-                submitter.push(out, channels);
+        let mut sink = |out: &[i32; MAX_CH]| {
+            if let Some(file) = dump.as_mut() {
+                use std::io::Write as _;
+                let mut bytes = Vec::with_capacity(channels * 3);
+                for channel in 0..channels {
+                    let be = out[channel].to_be_bytes();
+                    bytes.extend_from_slice(&be[1..4]);
+                }
+                let _ = file.write_all(&bytes);
+            }
+            match render_stage.as_mut() {
+                Some(stage) => stage.push(out, channels, meter, submitter),
+                None => {
+                    meter.add_frame(out, channels);
+                    submitter.push(out, channels);
+                }
             }
         };
         resampler.flush(channels, &mut sink);

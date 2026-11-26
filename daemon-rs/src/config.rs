@@ -281,11 +281,12 @@ pub fn plan_layout(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResamplerKind {
-    /// rubato sinc resampler (optional; the live 44.1k path has an open
-    /// white-noise report since 2026-11-26, the daemon logs a WARN when selected).
+    /// rubato sinc resampler (default). Verified clean on the live 44.1k path:
+    /// the post-resampler dump (--dump-pcm) and the raw RTP payload both carry the
+    /// expected tone (SNR ~200 dB vs noise floor, zcr 0.042/0.063 for 1k/1.5k).
     Rubato,
     /// C-daemon-compatible 160 phase x 287 tap Q30 polyphase FIR, bit-exact
-    /// against `aes67_rtp_sender_v4.c` for A/B verification. Default since 0.2.4.
+    /// against `aes67_rtp_sender_v4.c` for A/B verification.
     CPoly,
 }
 
@@ -405,7 +406,7 @@ impl Default for Config {
         auto_idle_ms: 0,
             prebuffer_ms: 20,
             local_ip: None,
-            resampler: ResamplerKind::CPoly,
+            resampler: ResamplerKind::Rubato,
             sap: false,
             sap_interval_s: 30,
             sap_destination: None,
